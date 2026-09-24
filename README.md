@@ -44,6 +44,51 @@ To try the interface with fake windows (nothing on your desktop moves), run `pyt
 | **Show zones on screen** | Flashes numbered overlays on the real monitor |
 | **Restore original positions** | Puts every window back where it was before Windower moved it |
 
+### Linked edges, dividers and nodes (no gaps, ever)
+
+Once a layout is applied, the tiled windows behave like one connected surface:
+
+- **Resize a window normally** (drag its border on the desktop). With **Linked edges** on, the
+  neighbouring windows follow live, so no gap or overlap appears. Screen edges stay pinned; if
+  you pull a window away from the screen edge it snaps back when you let go.
+- **In the preview**, the grey lines between zones are *dividers* and the orange dots are
+  *nodes* (where lines meet, like the centre of a 2x2 grid or the "T" of *Big left + 2 stacked*).
+  Drag a divider to move that line, or drag a node to move every line that meets there. The real
+  windows follow live.
+- **Resize handles on desktop** puts the same grips (blue bars on the dividers, orange dots on the nodes)
+  right on your screen, between the windows. Toggle them with the checkbox or the hotkey.
+- A divider only moves the windows that actually share it. In a 2x2 grid you can move the top
+  and bottom halves of the middle line separately, or grab the centre node to move both together.
+- After adjusting, **Save sizes as...** stores the new proportions as a custom layout.
+  **Reset sizes** goes back to the original proportions. Saving a *workspace* also remembers the
+  adjusted sizes.
+
+### Shift-drag snapping
+
+Drag **any** window by its title bar and hold **Shift**. The zones appear on screen and the one
+under the mouse is highlighted. Let go and the window snaps into that zone. If the zone already
+has a window, the two windows swap places.
+
+### Global hotkeys
+
+These work from any app. The modifier can be changed in the *Hotkeys* box (`Ctrl+Alt` by default,
+`Off` disables them). The **?** button shows the list.
+
+| Keys | Action |
+|---|---|
+| Ctrl+Alt + 1...9 | Focus the window in zone 1-9 |
+| Ctrl+Alt + Shift + 1...9 | Move the active window into zone 1-9 (swaps if taken) |
+| Ctrl+Alt + Arrow | Focus the neighbouring zone in that direction |
+| Ctrl+Alt + Shift + Arrow | Swap the active window with its neighbour |
+| Ctrl+Alt + Enter | Apply / re-tile the layout |
+| Ctrl+Alt + W | Show / hide the Windower panel |
+| Ctrl+Alt + H | Show / hide the resize handles on the desktop |
+| Ctrl+Alt + Z | Flash the zones on screen |
+
+If another program already uses a combination, the status bar tells you which one. You can then
+pick a different modifier. (Some Intel graphics drivers use Ctrl+Alt+Arrow to rotate the screen;
+if that happens, switch to *Win+Alt*.)
+
 ### Custom layouts (layout editor)
 
 Press **New custom...** (or **Edit...**):
@@ -54,6 +99,8 @@ Press **New custom...** (or **Edit...**):
 - right-click or **Del** to delete a zone, **Ctrl+Z** to undo
 - type exact percentages in the *Left / Top / Width / Height* boxes
 - edges snap to the grid you choose and to the edges of neighboring zones
+- with **Link shared edges** on, dragging a shared edge also resizes the neighbouring zone, and the
+  orange node dots move every line that meets there
 - **Preview on monitor** shows the zones on the real screen
 
 Zones can overlap. For example, you can place a small zone on top of a big one for a
@@ -85,10 +132,13 @@ Your layouts, workspaces and settings are stored in `%APPDATA%\Windower\config.j
 main.py                 entry point  (--demo for simulated windows)
 Windower.pyw            double-click launcher without console
 windower_app/
-  win32.py              Win32 API via ctypes: list windows/monitors, move, focus, topmost
+  win32.py              Win32 API via ctypes: windows/monitors, move, focus, topmost,
+                        move/resize event hook + global hotkeys (background thread)
   fakewin.py            simulated desktop (demo mode + tests)
   backend.py            picks win32 or fake
-  model.py              Rect, Zone, Layout, Slot, window matching
+  model.py              Rect, Zone, Layout, Slot, window matching, dividers/nodes geometry
+  desktop.py            on-screen snap overlay and resize handles
+  hotkeys.py            hotkey table
   presets.py            built-in layouts
   storage.py            JSON persistence
   editor.py             custom layout editor
@@ -99,7 +149,6 @@ tests/test_core.py      python -m unittest discover tests
 
 ## Ideas for next steps
 
-- Global hotkeys (for example Ctrl+Alt+1..9 to focus zone N, or to re-apply a workspace)
 - Live DWM thumbnails of each window inside the preview
 - A tray icon and start with Windows
-- Snapping a window into a zone by dragging it on the desktop with Shift held
+- Per-monitor layouts (a different layout on each screen at the same time)

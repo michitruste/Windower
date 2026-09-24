@@ -70,7 +70,7 @@ def is_topmost(hwnd: int) -> bool:
     return _windows.get(hwnd, {}).get("top", False)
 
 
-def place(hwnd: int, target: Rect) -> bool:
+def place(hwnd: int, target: Rect, fast: bool = False) -> bool:
     if hwnd not in _windows:
         return False
     _windows[hwnd]["rect"] = target
@@ -116,8 +116,44 @@ def root_window(hwnd: int) -> int:
     return hwnd
 
 
+_input = {"cursor": (0, 0), "shift": False, "button": False}
+
+
 def mouse_button_down() -> bool:
-    return False
+    return _input["button"]
+
+
+def cursor_pos() -> tuple[int, int]:
+    return _input["cursor"]
+
+
+def shift_down() -> bool:
+    return _input["shift"]
+
+
+def style_overlay(tk_hwnd: int, click_through: bool) -> None:
+    pass
+
+
+class EventSource:
+    """Fake event thread: tests push events with fire()."""
+
+    def __init__(self):
+        self.events: list[tuple] = []
+        self.hotkeys: list[tuple[int, int, int]] = []
+
+    def poll(self) -> list[tuple]:
+        out, self.events = self.events, []
+        return out
+
+    def set_hotkeys(self, hotkeys) -> None:
+        self.hotkeys = list(hotkeys)
+
+    def stop(self) -> None:
+        pass
+
+    def fire(self, *event) -> None:
+        self.events.append(tuple(event))
 
 
 def launch(exe_path: str) -> bool:
@@ -138,3 +174,12 @@ def move_by_user(hwnd: int, rect: Rect) -> None:
 def set_foreground(hwnd: int) -> None:
     global _fg
     _fg = hwnd
+
+
+def set_input(cursor=None, shift=None, button=None) -> None:
+    if cursor is not None:
+        _input["cursor"] = cursor
+    if shift is not None:
+        _input["shift"] = shift
+    if button is not None:
+        _input["button"] = button

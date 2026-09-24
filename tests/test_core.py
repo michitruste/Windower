@@ -6,7 +6,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from windower_app.model import Layout, Rect, WindowInfo, Zone, match_window  # noqa: E402
+from windower_app.model import (MIN_ZONE, Layout, Rect, WindowInfo, Zone, dividers, edge_group,  # noqa: E402
+                                 match_window, move_edges, node_edges, nodes)
 from windower_app.presets import PRESETS  # noqa: E402
 from windower_app.storage import Store  # noqa: E402
 
@@ -31,7 +32,7 @@ class ZoneTests(unittest.TestCase):
         self.assertEqual(r, Rect(-1920, 0, 1920, 1080))
 
     def test_thirds_cover_screen(self):
-        rects = [z.to_rect(AREA) for z in PRESETS[4].zones]  # 3 columns
+        rects = [z.to_rect(AREA) for z in next(p for p in PRESETS if p.name == "Grid 3x2").zones[:3]]
         self.assertEqual(rects[0].x, 0)
         self.assertEqual(rects[-1].x + rects[-1].w, 1920)
         for r1, r2 in zip(rects, rects[1:]):
@@ -53,6 +54,57 @@ class ZoneTests(unittest.TestCase):
                 self.assertGreaterEqual(z.x, 0)
                 self.assertLessEqual(z.x + z.w, 1.0001)
                 self.assertLessEqual(z.y + z.h, 1.0001)
+
+
+class DividerTests(unittest.TestCase):
+    def grid(self):
+        return [z for z in next(p for p in PRESETS if p.name == "Grid 2x2").copy().zones]
+
+    def test_grid_has_four_dividers_and_one_node(self):
+        zones = self.grid()
+        divs = dividers(zones)
+        self.assertEqual(len(divs), 4)          # top/bottom half of the "|", left/right half of the "-"
+        ns = nodes(zones, divs)
+        self.assertEqual(len(ns), 1)
+        self.assertAlmostEqual(ns[0].x, 0.5)
+        self.assertEqual((len(ns[0].v), len(ns[0].h)), (2, 2))
+
+    def test_segment_move_keeps_neighbours_glued(self):
+        zones = self.grid()
+        d = edge_group(zones, 0, "R")            # top-left's right edge
+        self.assertEqual(sorted(d.edges), [(0, "R"), (1, "L")])
+        move_edges(zones, d.edges, 0.7)
+        self.assertAlmostEqual(zones[0].w, 0.7)
+        self.assertAlmostEqual(zones[1].x, 0.7)
+        self.assertAlmostEqual(zones[1].x + zones[1].w, 1.0)
+        self.assertAlmostEqual(zones[2].w, 0.5)  # bottom row untouched
+
+    def test_node_moves_everything(self):
+        zones = self.grid()
+        n = nodes(zones)[0]
+        v, h = node_edges(n)
+        move_edges(zones, v, 0.3)
+        move_edges(zones, h, 0.6)
+        self.assertEqual([round(z.w, 3) for z in zones], [0.3, 0.7, 0.3, 0.7])
+        self.assertEqual([round(z.h, 3) for z in zones], [0.6, 0.6, 0.4, 0.4])
+
+    def test_t_junction_moves_whole_line(self):
+        zones = next(p for p in PRESETS if p.name == "Big left + 2 stacked").copy().zones
+        d = edge_group(zones, 1, "L")            # top-right's left edge
+        self.assertEqual(sorted(d.edges), [(0, "R"), (1, "L"), (2, "L")])
+        self.assertEqual(len(nodes(zones)), 1)
+
+    def test_clamped_to_min_size(self):
+        zones = self.grid()
+        d = edge_group(zones, 0, "R")
+        used = move_edges(zones, d.edges, 0.999)
+        self.assertAlmostEqual(used, 1 - MIN_ZONE)
+        self.assertGreaterEqual(zones[1].w, MIN_ZONE - 1e-9)
+
+    def test_outer_edges_are_not_dividers(self):
+        zones = [Zone(0, 0, 1, 1)]
+        self.assertEqual(dividers(zones), [])
+        self.assertFalse(edge_group(zones, 0, "R").interior)
 
 
 class MatchTests(unittest.TestCase):

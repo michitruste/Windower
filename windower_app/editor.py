@@ -15,7 +15,7 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 from typing import Callable
 
-from .model import Layout, Monitor, Zone
+from .model import Layout, Monitor, Zone, edge_group, move_edges, node_edges, nodes
 from .ui_common import (ACCENT, BG, CANVAS_BG, FG, MUTED, PANEL, SELECT, Overlay,
                         blend, set_cursor, zone_color)
 
@@ -56,6 +56,7 @@ class LayoutEditor(tk.Toplevel):
         default_name = start.name if not start.builtin else f"My {start.name}"
         self.name_var = tk.StringVar(value=default_name)
         self.snap_var = tk.StringVar(value="1/12")
+        self.linked_var = tk.BooleanVar(value=True)
         self.field_vars = {k: tk.StringVar() for k in ("x", "y", "w", "h")}
 
         self._build()
@@ -81,6 +82,8 @@ class LayoutEditor(tk.Toplevel):
                             textvariable=self.snap_var)
         snap.pack(side="left", padx=6)
         snap.bind("<<ComboboxSelected>>", lambda _e: self._redraw())
+        ttk.Checkbutton(top, text="Link shared edges", variable=self.linked_var,
+                        command=self._redraw).pack(side="left", padx=(16, 0))
 
         mid = tk.Frame(self, bg=BG)
         mid.pack(fill="both", expand=True, padx=12)
@@ -123,7 +126,9 @@ class LayoutEditor(tk.Toplevel):
         btn("Preview on monitor", self._preview)
         tk.Label(side, text=("Drag empty space: new zone\nDrag zone: move\n"
                              "Drag edge/corner: resize\nRight-click: delete\n"
-                             "Double-click: split (Shift = rows)"),
+                             "Double-click: split (Shift = rows)\n"
+                             "Orange dot: drag to move every\nline that meets there\n"
+                             "Linked edges: neighbours follow"),
                  bg=PANEL, fg=MUTED, justify="left").pack(anchor="w", pady=(14, 0))
 
         bottom = tk.Frame(self, bg=BG)
@@ -150,11 +155,12 @@ class LayoutEditor(tk.Toplevel):
     def _grid_n(self) -> int:
         return SNAP_CHOICES.get(self.snap_var.get(), 0)
 
-    def _snap(self, v: float, axis: str, ignore: int | None) -> float:
-        """Snap a fraction to grid lines and to other zones' edges."""
+    def _snap(self, v: float, axis: str, ignore) -> float:
+        """Snap a fraction to grid lines and to other zones' edges (ignore: index or set)."""
+        ignore = ignore if isinstance(ignore, set) else {ignore}
         candidates = [0.0, 1.0]
         for i, z in enumerate(self.zones):
-            if i == ignore:
+            if i in ignore:
                 continue
             candidates += [z.x, z.x + z.w] if axis == "x" else [z.y, z.y + z.h]
         best = min(candidates, key=lambda c: abs(c - v))
@@ -184,10 +190,34 @@ class LayoutEditor(tk.Toplevel):
         return None, ""
 
     # --------------------------------------------------------------- mouse
+    def _node_at(self, px: float, py: float):
+        if not self.linked_var.get():
+            return None
+        for n in nodes(self.zones):
+            if abs(n.x * self.cw - px) <= EDGE_PX + 2 and abs(n.y * self.ch - py) <= EDGE_PX + 2:
+                return n
+        return None
+
     def _press(self, e) -> None:
         self.canvas.focus_set()
-        i, edges = self._hit(e.x, e.y)
         fx, fy = e.x / self.cw, e.y / self.ch
+        n = self._node_at(e.x, e.y)
+        if n is not None:
+            self._push_undo()
+            v, h = node_edges(n)
+            self._drag = {"mode": "linked", "gv": v, "gh": h, "moved": False}
+            self._redraw()
+            return
+        i, edges = self._hit(e.x, e.y)
+        if i is not None and edges and self.linked_var.get():
+            gv = [g for c in edges if c in "lr" for g in edge_group(self.zones, i, c.upper()).edges]
+            gh = [g for c in edges if c in "tb" for g in edge_group(self.zones, i, c.upper()).edges]
+            self._push_undo()
+            self.selected = i
+            self._drag = {"mode": "linked", "gv": gv, "gh": gh, "moved": False}
+            self._redraw()
+            self._sync_fields()
+            return
         self._push_undo()
         if i is None:
             self.selected = None
@@ -206,6 +236,14 @@ class LayoutEditor(tk.Toplevel):
             return
         fx = min(max(e.x / self.cw, 0.0), 1.0)
         fy = min(max(e.y / self.ch, 0.0), 1.0)
+        if d["mode"] == "linked":
+            d["moved"] = True
+            for key, axis, val in (("gv", "x", fx), ("gh", "y", fy)):
+                if d[key]:
+                    move_edges(self.zones, d[key], self._snap(val, axis, {i for i, _ in d[key]}), MIN_FRAC)
+            self._redraw()
+            self._sync_fields()
+            return
         if d["mode"] == "create":
             x2, y2 = self._snap(fx, "x", None), self._snap(fy, "y", None)
             d["rect"] = (min(d["fx"], x2), min(d["fy"], y2), abs(x2 - d["fx"]), abs(y2 - d["fy"]))
@@ -259,8 +297,11 @@ class LayoutEditor(tk.Toplevel):
     def _hover(self, e) -> None:
         if self._drag:
             return
-        i, edges = self._hit(e.x, e.y)
         c = self.canvas
+        if self._node_at(e.x, e.y) is not None:
+            set_cursor(c, "fleur")
+            return
+        i, edges = self._hit(e.x, e.y)
         if i is None:
             set_cursor(c, "crosshair")
         elif edges in ("lt", "rb"):
@@ -402,6 +443,10 @@ class LayoutEditor(tk.Toplevel):
             if sel:
                 for hx, hy in ((x1, y1), (x2, y1), (x1, y2), (x2, y2)):
                     c.create_rectangle(hx - 4, hy - 4, hx + 4, hy + 4, fill=SELECT, outline=ACCENT)
+        if self.linked_var.get():
+            for n in nodes(self.zones):
+                x, y = n.x * self.cw, n.y * self.ch
+                c.create_oval(x - 6, y - 6, x + 6, y + 6, fill="#f1b44c", outline=SELECT, width=2)
         d = self._drag
         if d and d["mode"] == "create" and d.get("rect"):
             x, y, w, h = d["rect"]

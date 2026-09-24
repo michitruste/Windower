@@ -147,3 +147,151 @@ def _common_words(a: str, b: str) -> bool:
     wa = {t for t in a.lower().replace("-", " ").split() if len(t) > 3}
     wb = {t for t in b.lower().replace("-", " ").split() if len(t) > 3}
     return bool(wa & wb)
+
+
+# ==========================================================================
+# Linked edges: dividers and intersection nodes
+# ==========================================================================
+# An "edge" is (zone_index, side) with side in "LRTB".  Edges on the same line
+# that touch each other along a real length form a *divider*.  Moving a divider
+# resizes every zone on both sides of it at once, so no gaps/overlaps appear.
+# A *node* is a point where vertical and horizontal dividers meet (the "+" of a
+# 2x2 grid, the "T" of "big left + 2 stacked"); dragging it moves all of them.
+
+EPS = 1e-4
+MIN_ZONE = 0.05          # smallest zone size (fraction of the monitor) when dragging
+VERTICAL = "LR"          # sides that are vertical lines (they move along x)
+
+
+def edge_coord(z: Zone, side: str) -> float:
+    return {"L": z.x, "R": z.x + z.w, "T": z.y, "B": z.y + z.h}[side]
+
+
+def edge_span(z: Zone, side: str) -> tuple[float, float]:
+    return (z.y, z.y + z.h) if side in VERTICAL else (z.x, z.x + z.w)
+
+
+@dataclass
+class Divider:
+    axis: str                        # "v" (moves along x) or "h" (moves along y)
+    coord: float
+    edges: list[tuple[int, str]]
+    span: tuple[float, float]
+
+    @property
+    def interior(self) -> bool:
+        return EPS < self.coord < 1 - EPS
+
+    @property
+    def key(self) -> tuple:
+        return (self.axis, tuple(sorted(self.edges)))
+
+
+def edge_group(zones: list[Zone], i: int, side: str) -> Divider:
+    """All edges linked to (i, side): same line and touching along a real length."""
+    vertical = side in VERTICAL
+    sides = VERTICAL if vertical else "TB"
+    c = edge_coord(zones[i], side)
+    group = [(i, side)]
+    lo, hi = edge_span(zones[i], side)
+    queue = [(i, side)]
+    while queue:
+        a, sa = queue.pop()
+        alo, ahi = edge_span(zones[a], sa)
+        for j, z in enumerate(zones):
+            for s in sides:
+                if (j, s) in group or abs(edge_coord(z, s) - c) > EPS:
+                    continue
+                blo, bhi = edge_span(z, s)
+                if min(ahi, bhi) - max(alo, blo) > EPS:   # overlap with real length
+                    group.append((j, s))
+                    queue.append((j, s))
+                    lo, hi = min(lo, blo), max(hi, bhi)
+    return Divider("v" if vertical else "h", c, group, (lo, hi))
+
+
+def dividers(zones: list[Zone]) -> list[Divider]:
+    """Every interior divider that has zones on both sides (i.e. is shared)."""
+    seen, out = set(), []
+    for i in range(len(zones)):
+        for side in "LRTB":
+            if (i, side) in seen:
+                continue
+            d = edge_group(zones, i, side)
+            seen.update(d.edges)
+            sides = {s for _, s in d.edges}
+            if d.interior and len(sides) == 2:
+                out.append(d)
+    return out
+
+
+@dataclass
+class Node:
+    x: float
+    y: float
+    v: list[Divider]
+    h: list[Divider]
+
+
+def nodes(zones: list[Zone], divs: list[Divider] | None = None) -> list[Node]:
+    """Points where at least one vertical and one horizontal divider meet."""
+    divs = dividers(zones) if divs is None else divs
+    vs = [d for d in divs if d.axis == "v"]
+    hs = [d for d in divs if d.axis == "h"]
+    found: list[Node] = []
+    for v in vs:
+        for h in hs:
+            if v.span[0] - EPS <= h.coord <= v.span[1] + EPS and h.span[0] - EPS <= v.coord <= h.span[1] + EPS:
+                node = next((n for n in found if abs(n.x - v.coord) < EPS and abs(n.y - h.coord) < EPS), None)
+                if node is None:
+                    node = Node(v.coord, h.coord, [], [])
+                    found.append(node)
+                if all(d.key != v.key for d in node.v):
+                    node.v.append(v)
+                if all(d.key != h.key for d in node.h):
+                    node.h.append(h)
+    return found
+
+
+def divider_range(zones: list[Zone], edges: list[tuple[int, str]], min_size: float = MIN_ZONE) -> tuple[float, float]:
+    """How far a set of edges on one line may move without squashing a zone."""
+    lo, hi = 0.0 + min_size, 1.0 - min_size
+    for i, s in edges:
+        z = zones[i]
+        if s == "L":
+            hi = min(hi, z.x + z.w - min_size)
+        elif s == "R":
+            lo = max(lo, z.x + min_size)
+        elif s == "T":
+            hi = min(hi, z.y + z.h - min_size)
+        else:
+            lo = max(lo, z.y + min_size)
+    return lo, hi
+
+
+def move_edges(zones: list[Zone], edges: list[tuple[int, str]], new: float,
+               min_size: float = MIN_ZONE) -> float:
+    """Move edges that lie on one line to `new` (clamped). Mutates zones, returns the used value."""
+    if not edges:
+        return new
+    lo, hi = divider_range(zones, edges, min_size)
+    if lo > hi:          # already at minimum on both sides
+        return edge_coord(zones[edges[0][0]], edges[0][1])
+    new = round(min(max(new, lo), hi), 5)
+    for i, s in edges:
+        z = zones[i]
+        if s == "L":
+            zones[i] = Zone(new, z.y, round(z.x + z.w - new, 5), z.h)
+        elif s == "R":
+            zones[i] = Zone(z.x, z.y, round(new - z.x, 5), z.h)
+        elif s == "T":
+            zones[i] = Zone(z.x, new, z.w, round(z.y + z.h - new, 5))
+        else:
+            zones[i] = Zone(z.x, z.y, z.w, round(new - z.y, 5))
+    return new
+
+
+def node_edges(node: Node) -> tuple[list[tuple[int, str]], list[tuple[int, str]]]:
+    v = [e for d in node.v for e in d.edges]
+    h = [e for d in node.h for e in d.edges]
+    return list(dict.fromkeys(v)), list(dict.fromkeys(h))

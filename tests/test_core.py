@@ -6,6 +6,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from windower_app import hotkeys  # noqa: E402
 from windower_app.model import (MIN_ZONE, Layout, Rect, WindowInfo, Zone, dividers, edge_group,  # noqa: E402
                                  match_window, move_edges, node_edges, nodes)
 from windower_app.presets import PRESETS  # noqa: E402
@@ -118,6 +119,36 @@ class MatchTests(unittest.TestCase):
         self.assertEqual(match_window(sig, wins, set()).hwnd, 2)
         self.assertEqual(match_window(sig, wins, {2}).hwnd, 1)   # falls back to same app
         self.assertIsNone(match_window({"exe": "spotify.exe"}, wins, set()))
+
+
+class HotkeyTests(unittest.TestCase):
+    def test_off_registers_nothing(self):
+        self.assertEqual(hotkeys.build("Off"), [])
+        self.assertEqual(hotkeys.build("no such modifier"), [])
+
+    def test_every_modifier_gives_unique_combinations(self):
+        for name, mods in hotkeys.MODIFIER_CHOICES.items():
+            if not mods:
+                continue
+            table = hotkeys.build(name)
+            self.assertEqual(len(table), len(hotkeys.ACTIONS), name)
+            combos = [(m, vk) for _hid, m, vk in table]
+            self.assertEqual(len(set(combos)), len(combos), name)   # RegisterHotKey rejects duplicates
+            for _hid, m, _vk in table:
+                self.assertEqual(m & mods, mods, name)
+
+    def test_move_and_swap_need_shift(self):
+        table = {hid: m for hid, m, _vk in hotkeys.build("Ctrl+Alt")}
+        for hid, (action, _arg, _shift, _vk) in hotkeys.ACTIONS.items():
+            has_shift = bool(table[hid] & hotkeys.MOD_SHIFT)
+            self.assertEqual(has_shift, action in ("move_to_zone", "swap_dir"), action)
+
+    def test_describe(self):
+        self.assertEqual(hotkeys.describe(1, "Ctrl+Alt"), "Ctrl+Alt+1")
+        self.assertEqual(hotkeys.describe(19, "Ctrl+Alt"), "Ctrl+Alt+Shift+9")
+        self.assertEqual(hotkeys.describe(20, "Win+Alt"), "Win+Alt+Left")
+        self.assertEqual(hotkeys.describe(30, "Ctrl+Alt"), "Ctrl+Alt+Enter")
+        self.assertEqual(hotkeys.describe(31, "Ctrl+Alt"), "Ctrl+Alt+W")
 
 
 class StoreTests(unittest.TestCase):

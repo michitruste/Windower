@@ -35,7 +35,7 @@ To try the interface with fake windows (nothing on your desktop moves), run `pyt
 |---|---|
 | Drag one zone onto another in the preview | Swaps the two windows (applied immediately once you've applied a layout) |
 | Double-click a zone | Focuses that window |
-| Right-click a zone | Menu with Focus, Always on top, Pick, Clear |
+| Right-click a zone | Menu with Focus, Always on top, Pick, Zoom area, Clear |
 | **Always on top** | Keeps that window above the others. Handy for a video or chat |
 | **Keep windows in place** | If a window gets moved or maximized, it goes back to its zone within about 1 second |
 | **Gap px** | Space between the windows |
@@ -44,6 +44,37 @@ To try the interface with fake windows (nothing on your desktop moves), run `pyt
 | **Show zones on screen** | Flashes numbered overlays on the real monitor |
 | **Restore original positions** | Puts every window back where it was before Windower moved it |
 | App icons | The *Open windows* list, the zones and the drag label show each app's icon |
+
+### Zoom views (show only part of a window)
+
+A zone can show **just one area of a window**, for example the video of a web page, a
+chart in a trading app or the log panel of an IDE. The area is scaled up to fill the zone and
+stays live: videos keep playing and text keeps updating.
+
+1. Select a zone and press **Zoom area...** (or right-click the zone > *Zoom into an area of a
+   window...*). Windower uses the zone's own window, else the one selected in the list, else asks
+   you to click a window on the desktop.
+2. The window comes to the front, dimmed. **Drag over the part you want to see** (Esc cancels).
+3. The zone now shows that area. The window itself is **not** moved into the zone. Keep it
+   open anywhere, even behind other windows or tiled in another zone.
+
+- **Click a zoom view to use the window.** The real window slides over the view, with the
+  chosen area centred on it, and gets the focus. Once you switch to another app, it goes back
+  where it was, behind the others. If the window is tiled in another zone as well, clicking just
+  focuses it there.
+- Right-click a zoom view (on the desktop or in the preview) for *Change zoom area...* and
+  *Show whole window (tile it)*. *Always on top* keeps the zoom view above other windows.
+- Dividers, nodes, desktop handles, swapping and workspaces all work with zoom zones.
+- The preview marks zoom zones with **ZOOM WxH**.
+- The picture comes from Windows itself (the same live thumbnails the taskbar uses), so it
+  costs almost nothing. Windows can only show a window that is open. If the window gets
+  **minimized**, the view says so; click it to bring the window back. **Apply layout**
+  also un-minimizes zoom windows.
+- **Chrome, Edge and other Chromium apps** (Opera, Brave, Electron apps) stop painting when
+  they're completely covered by other windows, and then the zoom view freezes. Leave a bit of the
+  window visible, or start the browser with
+  `--disable-features=CalculateNativeWinOcclusion`.
+- In demo mode, zoom views show a placeholder, since there are no real windows to show.
 
 ### Several monitors
 
@@ -151,7 +182,7 @@ main.py                 entry point  (--demo for simulated windows)
 Windower.pyw            double-click launcher without console
 windower_app/
   win32.py              Win32 API via ctypes: windows/monitors, move, focus, topmost, icons,
-                        move/resize event hook + global hotkeys (background thread)
+                        DWM thumbnails, move/resize event hook + global hotkeys (background thread)
   fakewin.py            simulated desktop (demo mode + tests)
   backend.py            picks win32 or fake
   model.py              Rect, Zone, Layout, Slot, Screen, window matching, dividers/nodes geometry
@@ -163,6 +194,7 @@ windower_app/
   app.py                control panel
   icons.py              icon pixels -> PNG (no Pillow needed)
   ui_common.py          colors, on-screen overlay, icon cache
+  zoomview.py           zoom views (part of a window, live, in a zone), peek, area picker
 tests/test_core.py      python -m unittest discover tests
 ```
 

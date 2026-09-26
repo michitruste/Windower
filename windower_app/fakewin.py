@@ -110,10 +110,12 @@ def focus(hwnd: int) -> None:
         _fg = hwnd
 
 
-def raise_no_focus(hwnd: int) -> None:
-    if hwnd in _windows:
-        _windows[hwnd]["min"] = False
-        _front(hwnd)
+def raise_no_focus(hwnd: int) -> bool:
+    if hwnd not in _windows:
+        return False
+    _windows[hwnd]["min"] = False
+    _front(hwnd)
+    return True
 
 
 def set_topmost(hwnd: int, on: bool) -> None:
@@ -128,6 +130,38 @@ def minimize(hwnd: int) -> None:
 
 def foreground() -> int:
     return _fg
+
+
+TITLE_BAR = 30
+
+
+def client_rect(hwnd: int) -> Rect:
+    r = _windows[hwnd]["rect"]
+    return Rect(r.x, r.y + TITLE_BAR, r.w, r.h - TITLE_BAR)
+
+
+def get_pid(hwnd: int) -> int:
+    return _windows[hwnd]["info"].pid if hwnd in _windows else 0
+
+
+def unminimize(hwnd: int) -> None:
+    if hwnd in _windows:
+        _windows[hwnd]["min"] = False
+
+
+def send_to_back(hwnd: int) -> None:
+    if hwnd in _z:
+        _z.remove(hwnd)
+        _z.append(hwnd)
+
+
+# the demo can't show real window contents: zoom views show a placeholder instead
+HAS_THUMBNAILS = False
+
+
+class Thumbnail:
+    def __init__(self, dest: int, src: int):
+        raise OSError("live thumbnails need the real Windows backend")
 
 
 def root_window(hwnd: int) -> int:

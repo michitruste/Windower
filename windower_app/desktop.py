@@ -24,16 +24,20 @@ class SnapOverlay:
         self.be = backend
         self.wins: list[tuple[tk.Toplevel, tk.Frame, tk.Label]] = []
         self.rects: list[Rect] = []
+        self.numbers: list[int] = []
         self.current: int | None = None
 
     @property
     def visible(self) -> bool:
         return bool(self.wins)
 
-    def show(self, rects: list[Rect]) -> None:
+    def show(self, rects: list[Rect], numbers: list[int] | None = None) -> None:
+        """numbers: zone index shown for each rect (zones on every monitor start at 1)."""
         self.hide()
         self.rects = rects
+        self.numbers = numbers or list(range(len(rects)))
         for i, r in enumerate(rects):
+            n = self.numbers[i]
             t = tk.Toplevel(self.root)
             t.overrideredirect(True)
             try:
@@ -42,9 +46,9 @@ class SnapOverlay:
             except tk.TclError:
                 pass
             t.geometry(geometry(r))
-            f = tk.Frame(t, bg=IDLE_ZONE, highlightthickness=3, highlightbackground=zone_color(i))
+            f = tk.Frame(t, bg=IDLE_ZONE, highlightthickness=3, highlightbackground=zone_color(n))
             f.pack(fill="both", expand=True)
-            lbl = tk.Label(f, text=str(i + 1), bg=IDLE_ZONE, fg="white",
+            lbl = tk.Label(f, text=str(n + 1), bg=IDLE_ZONE, fg="white",
                            font=("Segoe UI", max(20, min(r.w, r.h) // 6), "bold"))
             lbl.pack(expand=True)
             t.update_idletasks()
@@ -67,8 +71,9 @@ class SnapOverlay:
             return
         self.current = i
         for k, (_t, f, lbl) in enumerate(self.wins):
-            bg = zone_color(k) if k == i else IDLE_ZONE
-            f.configure(bg=bg, highlightbackground=SELECT if k == i else zone_color(k))
+            color = zone_color(self.numbers[k])
+            bg = color if k == i else IDLE_ZONE
+            f.configure(bg=bg, highlightbackground=SELECT if k == i else color)
             lbl.configure(bg=bg)
 
     def hide(self) -> None:

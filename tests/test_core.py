@@ -8,9 +8,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from windower_app import fakewin, hotkeys  # noqa: E402
 from windower_app.icons import png_bytes, rgba_from_black_white  # noqa: E402
-from windower_app.model import (MIN_ZONE, Layout, Monitor, Rect, WindowInfo, Zone, dividers,  # noqa: E402
-                                 edge_group, fit_on_screen, match_window, move_edges,
-                                 node_edges, nodes)
+from windower_app.model import (MIN_ZONE, Layout, Monitor, Rect, Screen, WindowInfo, Zone,  # noqa: E402
+                                 dividers, edge_group, fit_on_screen, match_window, monitor_at,
+                                 move_edges, neighbour, node_edges, nodes)
 from windower_app.presets import PRESETS  # noqa: E402
 from windower_app.storage import Store  # noqa: E402
 
@@ -219,6 +219,30 @@ class IconTests(unittest.TestCase):
     def test_demo_backend_has_icons(self):
         self.assertEqual(len(fakewin.window_icon(1010, 20)), 20 * 20 * 4)
         self.assertIsNone(fakewin.window_icon(4242, 20))
+
+
+class MultiMonitorTests(unittest.TestCase):
+    MONITORS = [Monitor("A", Rect(0, 0, 1920, 1080), AREA, True),
+                Monitor("B", Rect(1920, 0, 2560, 1440), Rect(1920, 0, 2560, 1400))]
+
+    def test_screen_starts_with_one_empty_slot_per_zone(self):
+        scr = Screen(next(p for p in PRESETS if p.name == "Grid 2x2").copy())
+        self.assertEqual(scr.slots, [None] * 4)
+        self.assertFalse(scr.adjusted)
+
+    def test_monitor_at(self):
+        self.assertEqual(monitor_at(self.MONITORS, 10, 10), 0)
+        self.assertEqual(monitor_at(self.MONITORS, 1920, 1200), 1)
+        self.assertIsNone(monitor_at(self.MONITORS, 100, 1200))     # below the smaller monitor
+
+    def test_neighbour_crosses_monitors(self):
+        left = [z.to_rect(self.MONITORS[0].work) for z in (Zone(0, 0, 0.5, 1), Zone(0.5, 0, 0.5, 1))]
+        right = [z.to_rect(self.MONITORS[1].work) for z in (Zone(0, 0, 1, 0.5), Zone(0, 0.5, 1, 0.5))]
+        rects = left + right
+        self.assertEqual(neighbour(rects, 1, "right"), 2)   # onto monitor B, top zone overlaps most
+        self.assertEqual(neighbour(rects, 3, "left"), 1)
+        self.assertEqual(neighbour(rects, 2, "down"), 3)
+        self.assertIsNone(neighbour(rects, 0, "left"))
 
 
 if __name__ == "__main__":

@@ -14,8 +14,9 @@ from tkinter import messagebox, simpledialog, ttk
 from . import hotkeys
 from .desktop import DesktopHandles, SnapOverlay
 from .editor import LayoutEditor
-from .model import (Layout, Monitor, Placement, Rect, Slot, WindowInfo, Zone, dividers, edge_coord,
-                    edge_group, fit_on_screen, match_window, move_edges, node_edges, nodes)
+from .model import (Layout, Monitor, Placement, Rect, Screen, Slot, WindowInfo, Zone, dividers, edge_coord,
+                    edge_group, fit_on_screen, match_window, monitor_at, move_edges, neighbour, node_edges,
+                    nodes)
 from .presets import PRESETS
 from .storage import Store
 from .ui_common import (ACCENT, BG, CANVAS_BG, FG, MUTED, PANEL, SELECT, IconCache, Overlay,
@@ -37,11 +38,11 @@ class WindowerApp:
         self.scale = max(1.0, root.winfo_fpixels("1i") / 96.0)
 
         s = self.store.settings
-        self.monitors: list[Monitor] = self.be.get_monitors()
-        self.layout: Layout = self._find_layout(s.get("layout", "2 columns")) or self._default_layout()
-        self.layout_adjusted = False
-        self.slots: list[Slot | None] = [None] * len(self.layout.zones)
-        self.selected_zone: int | None = 0
+        # one Screen (layout + windows) per monitor; the panel edits screens[cur]
+        self.monitors: list[Monitor] = self._get_monitors()
+        self.screens: list[Screen] = []
+        self.handles: list[DesktopHandles] = []
+        self.cur = min(max(int(s.get("monitor", 0)), 0), len(self.monitors) - 1)
         self.original: dict[int, Placement] = {}
         self.windows: list[WindowInfo] = []
         self._win_sig: tuple = ()
@@ -55,7 +56,8 @@ class WindowerApp:
 
         self.events = self.be.EventSource()
         self.snap_overlay = SnapOverlay(root, backend)
-        self.handles = DesktopHandles(root, backend, self._handle_drag)
+        self._snap_keys: list[tuple[int, int]] = []   # (monitor, zone) of each snap overlay rect
+        self._sync_screens()
         self.icons = IconCache(root, backend, size=round(16 * self.scale))
 
         self.monitor_var = tk.StringVar()
@@ -74,7 +76,7 @@ class WindowerApp:
 
         self._style()
         self._build()
-        self._refresh_monitors(select=int(s.get("monitor", 0)))
+        self._refresh_monitors(select=self.cur)
         self._refresh_layouts()
         self._refresh_workspaces()
         self.refresh_windows(force=True)
@@ -141,7 +143,7 @@ class WindowerApp:
         ttk.Spinbox(head, from_=0, to=60, increment=2, width=4, textvariable=self.gap_var,
                     command=self._gap_changed).pack(side="right")
         tk.Label(head, text="Gap px", bg=BG, fg=FG).pack(side="right", padx=(12, 4))
-        self.monitor_cb = ttk.Combobox(head, state="readonly", width=24, textvariable=self.monitor_var)
+        self.monitor_cb = ttk.Combobox(head, state="readonly", width=40, textvariable=self.monitor_var)
         self.monitor_cb.pack(side="right")
         self.monitor_cb.bind("<<ComboboxSelected>>", lambda _e: self._monitor_changed())
         tk.Label(head, text="Monitor", bg=BG, fg=FG).pack(side="right", padx=(0, 4))
@@ -271,11 +273,59 @@ class WindowerApp:
     def set_status(self, text: str, warn: bool = False) -> None:
         self.status.configure(text=text, fg="#f1b44c" if warn else MUTED)
 
+    # the panel (layout dropdown, zone bar, editor...) works on the current monitor's screen
+    @property
+    def screen(self) -> Screen:
+        return self.screens[self.cur]
+
+    @property
+    def layout(self) -> Layout:
+        return self.screen.layout
+
+    @layout.setter
+    def layout(self, lay: Layout) -> None:
+        self.screen.layout = lay
+
+    @property
+    def slots(self) -> list[Slot | None]:
+        return self.screen.slots
+
+    @slots.setter
+    def slots(self, slots: list[Slot | None]) -> None:
+        self.screen.slots = slots
+
+    @property
+    def layout_adjusted(self) -> bool:
+        return self.screen.adjusted
+
+    @layout_adjusted.setter
+    def layout_adjusted(self, v: bool) -> None:
+        self.screen.adjusted = v
+
+    @property
+    def selected_zone(self) -> int | None:
+        return self.screen.selected
+
+    @selected_zone.setter
+    def selected_zone(self, i: int | None) -> None:
+        self.screen.selected = i
+
+    @property
+    def multi(self) -> bool:
+        return len(self.monitors) > 1
+
     def monitor(self) -> Monitor:
-        idx = self.monitor_cb.current()
-        if idx < 0 or idx >= len(self.monitors):
-            idx = 0
-        return self.monitors[idx]
+        return self.monitors[self.cur]
+
+    def _assigned(self):
+        """(monitor, zone, slot) for every zone on every monitor that has a window."""
+        for m, scr in enumerate(self.screens):
+            for i, s in enumerate(scr.slots):
+                if s:
+                    yield m, i, s
+
+    def _zone_name(self, m: int, i: int) -> str:
+        return f"monitor {m + 1}, zone {i + 1}" if self.multi else f"zone {i + 1}"
 
     def gap(self) -> int:
         try:
@@ -303,12 +353,14 @@ class WindowerApp:
     def _display_name(self, lay: Layout) -> str:
         return (CUSTOM_MARK + lay.name) if self._is_custom(lay.name) and not lay.builtin else lay.name
 
-    def _target(self, i: int) -> Rect:
-        return self.layout.zones[i].to_rect(self.monitor().work, self.gap())
+    def _target(self, i: int, m: int | None = None) -> Rect:
+        m = self.cur if m is None else m
+        return self.screens[m].layout.zones[i].to_rect(self.monitors[m].work, self.gap())
 
     def _save_settings(self) -> None:
         self.store.settings.update({
-            "layout": self.layout.name, "monitor": max(0, self.monitor_cb.current()),
+            "layout": self.layout.name, "monitor": self.cur,
+            "screen_layouts": [scr.layout.name for scr in self.screens],
             "gap": self.gap(), "keep_in_place": self.keep_var.get(),
             "minimize_panel": self.minimize_var.get(), "launch_missing": self.launch_var.get(),
             "linked_edges": self.linked_var.get(), "shift_snap": self.shiftsnap_var.get(),
@@ -319,20 +371,56 @@ class WindowerApp:
         except OSError:
             pass
 
-    def _slot_alive(self, i: int) -> bool:
-        s = self.slots[i] if i < len(self.slots) else None
+    def _slot_alive(self, i: int, m: int | None = None) -> bool:
+        slots = self.slots if m is None else self.screens[m].slots
+        s = slots[i] if i < len(slots) else None
         return bool(s and s.hwnd and self.be.is_window(s.hwnd))
 
     # ========================================================== monitors
+    def _get_monitors(self) -> list[Monitor]:
+        return self.be.get_monitors() or [Monitor("?", Rect(0, 0, 1920, 1080), Rect(0, 0, 1920, 1040), True)]
+
+    def _sync_screens(self) -> None:
+        """One screen and one set of desktop handles per monitor (after monitors appear/disappear)."""
+        names = self.store.settings.get("screen_layouts") or []
+        while len(self.screens) < len(self.monitors):
+            k = len(self.screens)
+            name = names[k] if k < len(names) else self.store.settings.get("layout", "2 columns")
+            self.screens.append(Screen(self._find_layout(name) or self._default_layout()))
+        for scr in self.screens[len(self.monitors):]:
+            for s in scr.slots:
+                if s and s.topmost and self.be.is_window(s.hwnd):
+                    self.be.set_topmost(s.hwnd, False)
+        del self.screens[len(self.monitors):]
+        for h in self.handles:
+            h.hide()
+        self.handles = [DesktopHandles(self.root, self.be, lambda *a, m=m: self._handle_drag(m, *a))
+                        for m in range(len(self.monitors))]
+        self.cur = min(self.cur, len(self.monitors) - 1)
+
     def _refresh_monitors(self, select: int = 0) -> None:
-        self.monitors = self.be.get_monitors() or [Monitor("?", Rect(0, 0, 1920, 1080), Rect(0, 0, 1920, 1040), True)]
-        self.monitor_cb.configure(values=[m.label(i) for i, m in enumerate(self.monitors)])
-        self.monitor_cb.current(min(max(select, 0), len(self.monitors) - 1))
+        self.monitors = self._get_monitors()
+        self._sync_screens()
+        self.cur = min(max(select, 0), len(self.monitors) - 1)
+        self._refresh_monitor_labels()
+
+    def _refresh_monitor_labels(self) -> None:
+        self.monitor_cb.configure(values=[f"{m.label(k)} - {self.screens[k].layout.name}"
+                                          for k, m in enumerate(self.monitors)])
+        self.monitor_cb.current(self.cur)
+
+    def _set_current(self, m: int) -> None:
+        """Make monitor m the one the panel edits (layout dropdown, zone bar...)."""
+        if m == self.cur or not 0 <= m < len(self.screens):
+            return
+        self.cur = m
+        self.monitor_cb.current(m)
+        self._refresh_layouts()
+        self._select_zone(self.selected_zone)
 
     def _monitor_changed(self) -> None:
+        self._set_current(max(0, self.monitor_cb.current()))
         self._save_settings()
-        self.draw_preview()
-        self._refresh_handles()
 
     def _gap_changed(self) -> None:
         self._save_settings()
@@ -340,6 +428,7 @@ class WindowerApp:
 
     # =========================================================== layouts
     def _refresh_layouts(self) -> None:
+        self._refresh_monitor_labels()
         values = [p.name for p in PRESETS] + [CUSTOM_MARK + lay.name for lay in self.store.layouts]
         self.layout_cb.configure(values=values)
         self.layout_var.set(CUSTOM_MARK + self.layout.name if not self.layout.builtin else self.layout.name)
@@ -378,9 +467,10 @@ class WindowerApp:
         if dropped > 0:
             self.set_status(f"Layout '{lay.name}' has {n} zones - {dropped} window(s) were left out.", warn=True)
         else:
-            self.set_status(f"Layout '{lay.name}': {n} zone(s). Press Apply to arrange the windows.")
+            where = f" on monitor {self.cur + 1}" if self.multi else ""
+            self.set_status(f"Layout '{lay.name}'{where}: {n} zone(s). Press Apply to arrange the windows.")
         if self._already_applied():
-            self.apply(quiet=True)
+            self.apply(quiet=True, only={self.cur})
         else:
             self._refresh_handles()
 
@@ -442,8 +532,8 @@ class WindowerApp:
             self.set_layout(self._default_layout())
 
     def identify(self) -> None:
-        labels = [_short_app(s.exe) if s else "" for s in self.slots]
-        self.overlay.show(self.layout, self.monitor().work, self.gap(), ms=2000, labels=labels)
+        self.overlay.show_many([(scr.layout, self.monitors[m].work, [_short_app(s.exe) if s else "" for s in scr.slots])
+                                for m, scr in enumerate(self.screens)], self.gap(), ms=2000)
 
     # =========================================================== windows
     def refresh_windows(self, force: bool = False) -> None:
@@ -452,8 +542,8 @@ class WindowerApp:
         except Exception as ex:  # pragma: no cover
             self.set_status(f"Could not list windows: {ex}", warn=True)
             return
-        sig = tuple((w.hwnd, w.title) for w in wins) + (self.filter_var.get(),
-                                                         tuple(s.hwnd if s else 0 for s in self.slots))
+        used = {s.hwnd for _m, _i, s in self._assigned()}
+        sig = tuple((w.hwnd, w.title) for w in wins) + (self.filter_var.get(), tuple(sorted(used)))
         if not force and sig == self._win_sig:
             return
         self._win_sig = sig
@@ -461,7 +551,6 @@ class WindowerApp:
         sel = self.tree.selection()
         self.tree.delete(*self.tree.get_children())
         flt = self.filter_var.get().lower().strip()
-        used = {s.hwnd for s in self.slots if s}
         self.icons.prune({w.hwnd for w in wins} | used)
         for w in wins:
             if flt and flt not in w.title.lower() and flt not in w.exe.lower():
@@ -483,14 +572,15 @@ class WindowerApp:
 
     # ------------------------------------------------------------- assign
     def assign(self, zone: int, win: WindowInfo) -> None:
+        """Put win into a zone of the current monitor."""
         if zone is None or zone >= len(self.slots):
             return
-        # a window can only live in one zone -> move it
-        for i, s in enumerate(self.slots):
-            if s and s.hwnd == win.hwnd:
-                self.slots[i] = None
+        # a window can only live in one zone (on any monitor) -> move it
+        for m, i, s in list(self._assigned()):
+            if s.hwnd == win.hwnd:
+                self.screens[m].slots[i] = None
         self.slots[zone] = Slot.from_window(win)
-        self.set_status(f"Zone {zone + 1}  <-  {win.app}: {win.title}")
+        self.set_status(f"{self._zone_name(self.cur, zone).capitalize()}  <-  {win.app}: {win.title}")
         self.draw_preview()
         self._select_zone(zone)
         self.refresh_windows(force=True)
@@ -505,7 +595,8 @@ class WindowerApp:
         return None
 
     def auto_fill(self) -> None:
-        used = {s.hwnd for s in self.slots if s}
+        """Fill the empty zones of the current monitor with the most recently used free windows."""
+        used = {s.hwnd for _m, _i, s in self._assigned()}
         candidates = [w for w in self.windows if w.hwnd not in used]
         filled = 0
         for i in range(len(self.slots)):
@@ -515,7 +606,8 @@ class WindowerApp:
         self.draw_preview()
         self._select_zone(self.selected_zone)
         self.refresh_windows(force=True)
-        self.set_status(f"Auto-filled {filled} zone(s) with the most recently used windows.")
+        where = f" on monitor {self.cur + 1}" if self.multi else ""
+        self.set_status(f"Auto-filled {filled} zone(s){where} with the most recently used windows.")
 
     def clear_selected(self) -> None:
         i = self.selected_zone
@@ -529,6 +621,7 @@ class WindowerApp:
             self.refresh_windows(force=True)
 
     def clear_all(self) -> None:
+        """Empty every zone of the current monitor."""
         for s in self.slots:
             if s and s.topmost and self.be.is_window(s.hwnd):
                 self.be.set_topmost(s.hwnd, False)
@@ -572,10 +665,11 @@ class WindowerApp:
             self._drag_label = None
         if not d or not d["active"]:
             return
-        zone = self._zone_at_root(e.x_root, e.y_root)
+        key = self._zone_at_root(e.x_root, e.y_root)
         w = self._window(int(d["iid"]))
-        if zone is not None and w:
-            self.assign(zone, w)
+        if key is not None and w:
+            self._set_current(key[0])
+            self.assign(key[1], w)
         else:
             self.draw_preview()
 
@@ -595,53 +689,79 @@ class WindowerApp:
             self._select_zone(nxt)
 
     # ========================================================== preview
-    def _preview_geom(self) -> tuple[float, float, float, float]:
-        """Where the monitor is drawn inside the canvas: (ox, oy, width, height)."""
+    def _preview_geom(self, m: int | None = None) -> tuple[float, float, float, float]:
+        """Where monitor m's work area is drawn inside the canvas: (ox, oy, width, height).
+
+        All monitors are drawn at once, arranged the way Windows has them."""
+        m = self.cur if m is None else m
         cw = max(self.canvas.winfo_width(), 50)
         ch = max(self.canvas.winfo_height(), 50)
-        area = self.monitor().work
+        areas = [mo.work for mo in self.monitors]
+        bx1, by1 = min(a.x for a in areas), min(a.y for a in areas)
+        bx2, by2 = max(a.x + a.w for a in areas), max(a.y + a.h for a in areas)
         pad = 14
-        sc = min((cw - 2 * pad) / area.w, (ch - 2 * pad) / area.h)
-        w, h = area.w * sc, area.h * sc
-        return (cw - w) / 2, (ch - h) / 2, w, h
+        sc = min((cw - 2 * pad) / (bx2 - bx1), (ch - 2 * pad) / (by2 - by1))
+        ox, oy = (cw - (bx2 - bx1) * sc) / 2, (ch - (by2 - by1) * sc) / 2
+        sep = 8 if self.multi else 0          # keeps neighbouring monitors visibly apart
+        a = areas[m]
+        return (ox + (a.x - bx1) * sc + sep, oy + (a.y - by1) * sc + sep,
+                a.w * sc - 2 * sep, a.h * sc - 2 * sep)
 
-    def _zone_at(self, cx: float, cy: float) -> int | None:
-        ox, oy, w, h = self._preview_geom()
-        fx, fy = (cx - ox) / w, (cy - oy) / h
-        for i in range(len(self.layout.zones) - 1, -1, -1):
-            if self.layout.zones[i].contains(fx, fy):
-                return i
+    def _zone_at(self, cx: float, cy: float) -> tuple[int, int] | None:
+        """(monitor, zone) under a canvas point."""
+        for m, scr in enumerate(self.screens):
+            ox, oy, w, h = self._preview_geom(m)
+            fx, fy = (cx - ox) / w, (cy - oy) / h
+            if not (0 <= fx < 1 and 0 <= fy < 1):
+                continue
+            for i in range(len(scr.layout.zones) - 1, -1, -1):
+                if scr.layout.zones[i].contains(fx, fy):
+                    return m, i
         return None
 
-    def _zone_at_root(self, x_root: int, y_root: int) -> int | None:
+    def _zone_at_root(self, x_root: int, y_root: int) -> tuple[int, int] | None:
         c = self.canvas
         cx, cy = x_root - c.winfo_rootx(), y_root - c.winfo_rooty()
         if 0 <= cx < c.winfo_width() and 0 <= cy < c.winfo_height():
             return self._zone_at(cx, cy)
         return None
 
-    def draw_preview(self, hover: int | None = None, swap_from: int | None = None) -> None:
+    def draw_preview(self, hover: tuple[int, int] | None = None,
+                     swap_from: tuple[int, int] | None = None) -> None:
         c = self.canvas
         c.delete("all")
-        ox, oy, w, h = self._preview_geom()
-        c.create_rectangle(ox - 4, oy - 4, ox + w + 4, oy + h + 4, outline="#3a3c45", width=2)
-        g = self.gap() * (w / self.monitor().work.w)
-        for i, z in enumerate(self.layout.zones):
+        for m, scr in enumerate(self.screens):
+            self._draw_screen(m, scr, hover)
+        if swap_from is not None and hover is not None and hover != swap_from:
+            name = (lambda k: f"{k[0] + 1}.{k[1] + 1}") if self.multi else (lambda k: str(k[1] + 1))
+            c.create_text(c.winfo_width() / 2, c.winfo_height() - 2,
+                          text=f"swap zone {name(swap_from)} <-> {name(hover)}",
+                          fill=ACCENT, anchor="s", font=("Segoe UI", 9, "bold"))
+
+    def _draw_screen(self, m: int, scr: Screen, hover: tuple[int, int] | None) -> None:
+        c = self.canvas
+        ox, oy, w, h = self._preview_geom(m)
+        current = m == self.cur
+        c.create_rectangle(ox - 4, oy - 4, ox + w + 4, oy + h + 4, width=2,
+                           outline=ACCENT if current and self.multi else "#3a3c45")
+        g = self.gap() * (w / self.monitors[m].work.w)
+        for i, z in enumerate(scr.layout.zones):
             x1 = ox + z.x * w + g / 2 + 2
             y1 = oy + z.y * h + g / 2 + 2
             x2 = ox + (z.x + z.w) * w - g / 2 - 2
             y2 = oy + (z.y + z.h) * h - g / 2 - 2
             col = zone_color(i)
-            sel = i == self.selected_zone
-            alive = self._slot_alive(i)
-            fill = blend(col, alpha=0.45 if hover == i else (0.32 if alive else 0.12))
-            outline = SELECT if (sel or hover == i) else col
-            c.create_rectangle(x1, y1, x2, y2, fill=fill, outline=outline, width=3 if sel or hover == i else 2,
+            sel = current and i == scr.selected
+            hot = hover == (m, i)
+            alive = self._slot_alive(i, m)
+            fill = blend(col, alpha=0.45 if hot else (0.32 if alive else 0.12))
+            outline = SELECT if (sel or hot) else col
+            c.create_rectangle(x1, y1, x2, y2, fill=fill, outline=outline, width=3 if sel or hot else 2,
                                dash=() if alive else (5, 3))
             cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
             c.create_text(x1 + 12, y1 + 10, text=str(i + 1), fill=col, anchor="nw",
                           font=("Segoe UI", 16, "bold"))
-            s = self.slots[i] if i < len(self.slots) else None
+            s = scr.slots[i] if i < len(scr.slots) else None
             wrap = max(40, x2 - x1 - 16)
             if s and alive:
                 icon = self.icons.get(s.hwnd)
@@ -649,8 +769,8 @@ class WindowerApp:
                     c.create_image(cx, cy - 26, image=icon, anchor="s")
                 c.create_text(cx, cy - 10, text=_short_app(s.exe), fill=FG, width=wrap,
                               font=("Segoe UI", 12, "bold"), justify="center")
-                c.create_text(cx, cy + 14, text=_trim(s.title, 70), fill=MUTED, width=wrap,
-                              font=("Segoe UI", 9), justify="center")
+                c.create_text(cx, cy + 6, text=_trim(s.title, 70), fill=MUTED, width=wrap, anchor="n",
+                              font=("Segoe UI", 9), justify="center")   # long titles wrap downwards
                 if s.topmost:
                     c.create_text(x2 - 8, y1 + 10, text="ON TOP", fill=col, anchor="ne",
                                   font=("Segoe UI", 9, "bold"))
@@ -661,8 +781,8 @@ class WindowerApp:
                 c.create_text(cx, cy, text="drop a window here", fill=MUTED, width=wrap,
                               justify="center", font=("Segoe UI", 9, "italic"))
         # dividers (lines between zones) and nodes (where lines meet) - drag them to resize
-        divs = dividers(self.layout.zones)
-        active = self._grip["edges"] if self._grip else set()
+        divs = dividers(scr.layout.zones)
+        active = self._grip["edges"] if self._grip and self._grip["m"] == m else set()
         for d in divs:
             hot = bool(set(d.edges) & active)
             if d.axis == "v":
@@ -673,47 +793,54 @@ class WindowerApp:
                 y = oy + d.coord * h
                 c.create_line(ox + d.span[0] * w + 6, y, ox + d.span[1] * w - 6, y,
                               fill=ACCENT if hot else "#6b6f7d", width=4 if hot else 2, capstyle="round")
-        for n in nodes(self.layout.zones, divs):
+        for n in nodes(scr.layout.zones, divs):
             x, y = ox + n.x * w, oy + n.y * h
             v, hh = node_edges(n)
             hot = bool(set(v + hh) & active)
             r = 8 if hot else 6
             c.create_oval(x - r, y - r, x + r, y + r, fill="#f1b44c", outline=SELECT, width=2)
-        if swap_from is not None and hover is not None and hover != swap_from:
-            c.create_text(ox + w / 2, oy + h + 2, text=f"swap zone {swap_from + 1} <-> {hover + 1}",
-                          fill=ACCENT, anchor="n", font=("Segoe UI", 9, "bold"))
+        if self.multi:  # monitor tag in the bottom-right corner
+            t = c.create_text(ox + w - 8, oy + h - 6, text=f"Monitor {m + 1}", anchor="se",
+                              fill="white" if current else FG, font=("Segoe UI", 9, "bold"))
+            x1, y1, x2, y2 = c.bbox(t)
+            bg = c.create_rectangle(x1 - 6, y1 - 2, x2 + 6, y2 + 2, width=0,
+                                    fill=ACCENT if current else "#3a3c45")
+            c.tag_lower(bg, t)
 
     def _select_zone(self, i: int | None) -> None:
         self.selected_zone = i if (i is not None and i < len(self.layout.zones)) else None
+        where = f"Monitor {self.cur + 1}, zone" if self.multi else "Zone"
         if self.selected_zone is None:
-            self.zone_label.configure(text="No zone selected")
+            self.zone_label.configure(text=f"Monitor {self.cur + 1}: no zone selected" if self.multi
+                                      else "No zone selected")
             self.topmost_var.set(False)
         else:
             s = self.slots[self.selected_zone]
             r = self._target(self.selected_zone)
             what = f"{_short_app(s.exe)} - {_trim(s.title, 40)}" if s else "empty"
-            self.zone_label.configure(text=f"Zone {self.selected_zone + 1} ({r.w}x{r.h}): {what}")
+            self.zone_label.configure(text=f"{where} {self.selected_zone + 1} ({r.w}x{r.h}): {what}")
             self.topmost_var.set(bool(s and s.topmost))
         self.draw_preview()
 
     # -------------------------------------------------------- canvas mouse
     def _grip_at(self, cx: float, cy: float) -> dict | None:
-        """Node or divider under the pointer in the preview."""
-        ox, oy, w, h = self._preview_geom()
-        divs = dividers(self.layout.zones)
-        for n in nodes(self.layout.zones, divs):
-            if abs(ox + n.x * w - cx) <= PREVIEW_GRIP + 2 and abs(oy + n.y * h - cy) <= PREVIEW_GRIP + 2:
-                v, hh = node_edges(n)
-                return {"v": v, "h": hh, "edges": set(v + hh), "kind": "node"}
-        for d in divs:
-            if d.axis == "v":
-                near = abs(ox + d.coord * w - cx) <= PREVIEW_GRIP and oy + d.span[0] * h <= cy <= oy + d.span[1] * h
-            else:
-                near = abs(oy + d.coord * h - cy) <= PREVIEW_GRIP and ox + d.span[0] * w <= cx <= ox + d.span[1] * w
-            if near:
-                v = d.edges if d.axis == "v" else []
-                hh = d.edges if d.axis == "h" else []
-                return {"v": v, "h": hh, "edges": set(d.edges), "kind": d.axis}
+        """Node or divider under the pointer in the preview (on any monitor)."""
+        for m, scr in enumerate(self.screens):
+            ox, oy, w, h = self._preview_geom(m)
+            divs = dividers(scr.layout.zones)
+            for n in nodes(scr.layout.zones, divs):
+                if abs(ox + n.x * w - cx) <= PREVIEW_GRIP + 2 and abs(oy + n.y * h - cy) <= PREVIEW_GRIP + 2:
+                    v, hh = node_edges(n)
+                    return {"m": m, "v": v, "h": hh, "edges": set(v + hh), "kind": "node"}
+            for d in divs:
+                if d.axis == "v":
+                    near = abs(ox + d.coord * w - cx) <= PREVIEW_GRIP and oy + d.span[0] * h <= cy <= oy + d.span[1] * h
+                else:
+                    near = abs(oy + d.coord * h - cy) <= PREVIEW_GRIP and ox + d.span[0] * w <= cx <= ox + d.span[1] * w
+                if near:
+                    v = d.edges if d.axis == "v" else []
+                    hh = d.edges if d.axis == "h" else []
+                    return {"m": m, "v": v, "h": hh, "edges": set(d.edges), "kind": d.axis}
         return None
 
     def _canvas_hover(self, e) -> None:
@@ -729,12 +856,15 @@ class WindowerApp:
     def _zone_press(self, e) -> None:
         g = self._grip_at(e.x, e.y)
         if g:
+            self._set_current(g["m"])
             self._grip = g
             self.draw_preview()
             return
-        i = self._zone_at(e.x, e.y)
-        self._zone_drag = {"from": i, "x": e.x, "y": e.y, "active": False} if i is not None else None
-        self._select_zone(i)
+        key = self._zone_at(e.x, e.y)
+        if key is not None:
+            self._set_current(key[0])
+        self._zone_drag = {"from": key, "x": e.x, "y": e.y, "active": False} if key is not None else None
+        self._select_zone(key[1] if key else None)
 
     def _zone_motion(self, e) -> None:
         if self._grip:
@@ -761,28 +891,36 @@ class WindowerApp:
         to = self._zone_at(e.x, e.y)
         fr = d["from"]
         if to is not None and to != fr:
-            self.slots[fr], self.slots[to] = self.slots[to], self.slots[fr]
-            self.set_status(f"Swapped zone {fr + 1} and zone {to + 1}. Press Apply (or it's automatic with "
-                            f"'Keep windows in place').")
-            self._select_zone(to)
-            if any(self._slot_alive(k) for k in (fr, to)) and self._already_applied():
-                self.apply(quiet=True)
+            (fm, fi), (tm, ti) = fr, to
+            a, b = self.screens[fm].slots, self.screens[tm].slots
+            a[fi], b[ti] = b[ti], a[fi]
+            self.set_status(f"Swapped {self._zone_name(fm, fi)} and {self._zone_name(tm, ti)}. Press Apply "
+                            f"(or it's automatic with 'Keep windows in place').")
+            self._set_current(tm)
+            self._select_zone(ti)
+            if (self._slot_alive(fi, fm) or self._slot_alive(ti, tm)) and \
+                    (self._already_applied(fm) or self._already_applied(tm)):
+                self.apply(quiet=True, only={fm, tm})
         else:
             self.draw_preview()
 
-    def _already_applied(self) -> bool:
-        return any(s and s.hwnd in self.original for s in self.slots)
+    def _already_applied(self, m: int | None = None) -> bool:
+        slots = self.slots if m is None else self.screens[m].slots
+        return any(s and s.hwnd in self.original for s in slots)
 
     def _zone_double(self, e) -> None:
-        i = self._zone_at(e.x, e.y)
-        if i is not None:
-            self._select_zone(i)
+        key = self._zone_at(e.x, e.y)
+        if key is not None:
+            self._set_current(key[0])
+            self._select_zone(key[1])
             self.focus_selected()
 
     def _zone_menu(self, e) -> None:
-        i = self._zone_at(e.x, e.y)
-        if i is None:
+        key = self._zone_at(e.x, e.y)
+        if key is None:
             return
+        self._set_current(key[0])
+        i = key[1]
         self._select_zone(i)
         m = tk.Menu(self.root, tearoff=False, bg=PANEL, fg=FG, activebackground=ACCENT)
         alive = self._slot_alive(i)
@@ -796,20 +934,22 @@ class WindowerApp:
         m.tk_popup(e.x_root, e.y_root)
 
     # ========================================================== actions
-    def apply(self, quiet: bool = False) -> None:
+    def apply(self, quiet: bool = False, only: set[int] | None = None) -> None:
+        """Arrange the windows of every monitor (or just the monitors in `only`)."""
         moved, failed, missing = 0, [], 0
-        order = []
-        for i, s in enumerate(self.slots):
-            if not s:
+        order, used = [], set()
+        for m, i, s in list(self._assigned()):
+            if only is not None and m not in only:
                 continue
             if not self.be.is_window(s.hwnd):
                 missing += 1
                 continue
-            target = self._target(i)
+            target = self._target(i, m)
             self._remember(s.hwnd)
             if self.be.place(s.hwnd, target):
                 moved += 1
                 order.append(s)
+                used.add(m)
             else:
                 failed.append(_short_app(s.exe))
         # z-order: everything tiled comes up together; topmost flags last
@@ -822,7 +962,10 @@ class WindowerApp:
         self._refresh_handles()
         if quiet:
             return
-        msg = f"Arranged {moved} window(s) on monitor {self.monitor_cb.current() + 1}."
+        if len(used) > 1:
+            msg = f"Arranged {moved} window(s) on {len(used)} monitors."
+        else:
+            msg = f"Arranged {moved} window(s) on monitor {(min(used) if used else self.cur) + 1}."
         if missing:
             msg += f"  {missing} assigned window(s) are closed."
         if failed:
@@ -836,8 +979,8 @@ class WindowerApp:
 
     def bring_all_front(self) -> None:
         n = 0
-        for s in self.slots:
-            if s and self.be.is_window(s.hwnd):
+        for _m, _i, s in self._assigned():
+            if self.be.is_window(s.hwnd):
                 self.be.raise_no_focus(s.hwnd)
                 n += 1
         self.set_status(f"Brought {n} window(s) to the front.")
@@ -874,10 +1017,10 @@ class WindowerApp:
                 self.be.restore_placement(hwnd, p)
                 n += 1
         self.original.clear()
-        self.handles.hide()
-        for s in self.slots:
-            if s:
-                s.topmost = False
+        for h in self.handles:
+            h.hide()
+        for _m, _i, s in self._assigned():
+            s.topmost = False
         self.keep_var.set(False)
         self._select_zone(self.selected_zone)
         self.set_status(f"Restored {n} window(s) to where they were before Windower moved them. "
@@ -889,8 +1032,8 @@ class WindowerApp:
         if i is None:
             self.set_status("Select a zone first.", warn=True)
             return
-        self._picking = {"zone": i, "left": 150, "start_fg": self.be.foreground()}
-        self.set_status(f"Click on the window you want in zone {i + 1}...  (15 s)")
+        self._picking = {"m": self.cur, "zone": i, "left": 150, "start_fg": self.be.foreground()}
+        self.set_status(f"Click on the window you want in {self._zone_name(self.cur, i)}...  (15 s)")
         self.root.iconify()
         self.root.after(400, self._pick_poll)
 
@@ -908,6 +1051,7 @@ class WindowerApp:
             self.windows = list(wins.values())
             self.root.deiconify()
             self.root.lift()
+            self._set_current(p["m"])
             self.assign(p["zone"], wins[fg])
             return
         if p["left"] <= 0:
@@ -925,7 +1069,7 @@ class WindowerApp:
             self.ws_var.set(names[0] if names else "")
 
     def save_workspace(self) -> None:
-        if not any(self.slots):
+        if not any(True for _ in self._assigned()):
             messagebox.showinfo("Windower", "Assign some windows to zones first.")
             return
         name = simpledialog.askstring("Save workspace", "Workspace name (e.g. 'Coding', 'Study', 'Streaming'):",
@@ -934,9 +1078,14 @@ class WindowerApp:
             return
         name = name.strip()
         self.store.put_workspace(name, {
-            "layout": self.layout.to_dict(),
-            "monitor": max(0, self.monitor_cb.current()),
+            # every monitor's layout and windows
+            "screens": [{"monitor": m, "device": self.monitors[m].name, "layout": scr.layout.to_dict(),
+                         "slots": [s.signature() if s else None for s in scr.slots]}
+                        for m, scr in enumerate(self.screens)],
+            "monitor": self.cur,
             "gap": self.gap(),
+            # the current monitor in the old one-monitor format, for older Windower versions
+            "layout": self.layout.to_dict(),
             "slots": [s.signature() if s else None for s in self.slots],
         })
         self.ws_var.set(name)
@@ -950,62 +1099,99 @@ class WindowerApp:
             self.ws_var.set("")
             self._refresh_workspaces()
 
+    def _monitor_for(self, saved: dict, used: set[int], legacy: bool) -> int | None:
+        """Which connected monitor a saved screen belongs on: same device name, else same position."""
+        names = [mo.name for mo in self.monitors]
+        dev = saved.get("device")
+        if dev in names and names.index(dev) not in used:
+            return names.index(dev)
+        k = int(saved.get("monitor", 0))
+        if legacy:  # old one-monitor workspaces always load somewhere
+            k = min(max(k, 0), len(self.monitors) - 1)
+        return k if 0 <= k < len(self.monitors) and k not in used else None
+
     def load_workspace(self) -> None:
         name = self.ws_var.get()
         data = self.store.workspaces.get(name)
         if not data:
             return
-        lay = Layout.from_dict(data["layout"])
-        existing = self._find_layout(lay.name)
-        if existing:
-            lay.builtin = existing.builtin
-        self.layout = lay
-        self.layout_adjusted = bool(existing) and [
-            (round(z.x, 4), round(z.y, 4), round(z.w, 4), round(z.h, 4)) for z in existing.zones] != [
-            (round(z.x, 4), round(z.y, 4), round(z.w, 4), round(z.h, 4)) for z in lay.zones]
-        self._refresh_monitors(select=int(data.get("monitor", 0)))
+        legacy = "screens" not in data
+        saved = data.get("screens") or [{"monitor": data.get("monitor", 0), "layout": data["layout"],
+                                         "slots": data.get("slots", [])}]
+        self._refresh_monitors(select=self.cur)   # monitors may have been plugged in/out since start
         self.gap_var.set(int(data.get("gap", 0)))
-        sigs = list(data.get("slots", []))
-        sigs += [None] * (len(lay.zones) - len(sigs))
-        self.slots = [None] * len(lay.zones)
+        sigs_by_m: dict[int, list] = {}
+        skipped = 0
+        for sd in saved:
+            m = self._monitor_for(sd, set(sigs_by_m), legacy)
+            if m is None:
+                skipped += 1
+                continue
+            lay = Layout.from_dict(sd["layout"])
+            existing = self._find_layout(lay.name)
+            if existing:
+                lay.builtin = existing.builtin
+            scr = self.screens[m]
+            for s in scr.slots:   # windows leaving this monitor shouldn't stay on top
+                if s and s.topmost and self.be.is_window(s.hwnd):
+                    self.be.set_topmost(s.hwnd, False)
+            scr.layout = lay
+            scr.adjusted = bool(existing) and [
+                (round(z.x, 4), round(z.y, 4), round(z.w, 4), round(z.h, 4)) for z in existing.zones] != [
+                (round(z.x, 4), round(z.y, 4), round(z.w, 4), round(z.h, 4)) for z in lay.zones]
+            scr.slots = [None] * len(lay.zones)
+            scr.selected = 0 if lay.zones else None
+            sigs = list(sd.get("slots", []))
+            sigs_by_m[m] = sigs + [None] * (len(lay.zones) - len(sigs))
+        if not sigs_by_m:
+            self.set_status(f"Workspace '{name}': none of its monitors are connected.", warn=True)
+            return
+        cur = int(data.get("monitor", 0))
+        self.cur = cur if cur in sigs_by_m else min(sigs_by_m)
         self._refresh_layouts()
-        missing = self._match_slots(sigs)
+        missing = self._match_slots(sigs_by_m)
         launched = 0
         if missing and self.launch_var.get():
-            for i in missing:
-                path = sigs[i].get("exe_path") if sigs[i] else ""
+            for m, i in missing:
+                sig = sigs_by_m[m][i]
+                path = sig.get("exe_path") if sig else ""
                 if path and self.be.launch(path):
                     launched += 1
-        self._select_zone(0)
+        self._select_zone(self.selected_zone)
         self.refresh_windows(force=True)
-        self.apply(quiet=True)
+        self.apply(quiet=True, only=set(sigs_by_m))
+        gone = f"  {skipped} saved monitor(s) are not connected." if skipped else ""
         if launched:
-            self._pending_launch = {"sigs": sigs, "tries": 20}
-            self.set_status(f"Workspace '{name}': started {launched} app(s), waiting for their windows...")
+            self._pending_launch = {"sigs": sigs_by_m, "tries": 20}
+            self.set_status(f"Workspace '{name}': started {launched} app(s), waiting for their windows...{gone}")
             self.root.after(1000, self._wait_for_launched)
         else:
             extra = f"  {len(missing)} app(s) not running." if missing else ""
-            self.set_status(f"Workspace '{name}' loaded.{extra}", warn=bool(missing))
+            self.set_status(f"Workspace '{name}' loaded.{extra}{gone}", warn=bool(missing or skipped))
 
-    def _match_slots(self, sigs: list) -> list[int]:
-        """Fill empty slots from saved signatures; returns indexes still missing."""
+    def _match_slots(self, sigs_by_m: dict[int, list]) -> list[tuple[int, int]]:
+        """Fill empty slots from saved signatures; returns the (monitor, zone)s still missing."""
         wins = self.be.list_windows()
         self.windows = wins
-        taken = {s.hwnd for s in self.slots if s and self.be.is_window(s.hwnd)}
+        taken = {s.hwnd for _m, _i, s in self._assigned() if self.be.is_window(s.hwnd)}
         missing = []
-        for i, sig in enumerate(sigs):
-            if not sig or i >= len(self.slots):
+        for m, sigs in sigs_by_m.items():
+            if m >= len(self.screens):
                 continue
-            if self._slot_alive(i):
-                continue
-            w = match_window(sig, wins, taken)
-            if w:
-                slot = Slot.from_window(w)
-                slot.topmost = bool(sig.get("topmost"))
-                self.slots[i] = slot
-                taken.add(w.hwnd)
-            else:
-                missing.append(i)
+            slots = self.screens[m].slots
+            for i, sig in enumerate(sigs):
+                if not sig or i >= len(slots):
+                    continue
+                if self._slot_alive(i, m):
+                    continue
+                w = match_window(sig, wins, taken)
+                if w:
+                    slot = Slot.from_window(w)
+                    slot.topmost = bool(sig.get("topmost"))
+                    slots[i] = slot
+                    taken.add(w.hwnd)
+                else:
+                    missing.append((m, i))
         return missing
 
     def _wait_for_launched(self) -> None:
@@ -1014,7 +1200,7 @@ class WindowerApp:
             return
         p["tries"] -= 1
         missing = self._match_slots(p["sigs"])
-        self.apply(quiet=True)
+        self.apply(quiet=True, only=set(p["sigs"]))
         self._select_zone(self.selected_zone)
         self.refresh_windows(force=True)
         if not missing:
@@ -1030,8 +1216,8 @@ class WindowerApp:
     def _tick(self) -> None:
         try:
             changed = False
-            for i, s in enumerate(self.slots):
-                if not s or not self.be.is_window(s.hwnd):
+            for m, i, s in list(self._assigned()):
+                if not self.be.is_window(s.hwnd):
                     continue
                 title = self.be.get_title(s.hwnd)
                 if title and title != s.title:
@@ -1039,7 +1225,7 @@ class WindowerApp:
                     changed = True
                 if (self.keep_var.get() and s.hwnd in self.original and not self._busy_dragging()
                         and not self.be.is_minimized(s.hwnd) and not self.be.mouse_button_down()):
-                    target = self._target(i)
+                    target = self._target(i, m)
                     if not self.be.get_rect(s.hwnd).close_to(target, 6):
                         self.be.place(s.hwnd, target)
             if changed and not self._zone_drag and not self._tree_drag:
@@ -1050,13 +1236,14 @@ class WindowerApp:
             self.root.after(TICK_MS, self._tick)
 
     def on_close(self) -> None:
-        for s in self.slots:  # don't leave windows stuck on top after we quit
-            if s and s.topmost and self.be.is_window(s.hwnd):
+        for _m, _i, s in self._assigned():  # don't leave windows stuck on top after we quit
+            if s.topmost and self.be.is_window(s.hwnd):
                 self.be.set_topmost(s.hwnd, False)
         self._save_settings()
         self.overlay.hide()
         self.snap_overlay.hide()
-        self.handles.hide()
+        for h in self.handles:
+            h.hide()
         try:
             self.events.stop()
         except Exception:
@@ -1065,10 +1252,10 @@ class WindowerApp:
 
     # ====================================================== linked edges
     def _busy_dragging(self) -> bool:
-        return bool(self._grip or self._movesize or self.handles.dragging)
+        return bool(self._grip or self._movesize or any(h.dragging for h in self.handles))
 
     def _move_grip(self, edges_v: list, edges_h: list, fx: float, fy: float, live: bool) -> None:
-        """Move dividers/node to fractional position (fx, fy) and update everything."""
+        """Move dividers/node of the current monitor to fractional position (fx, fy) and update everything."""
         changed = False
         if edges_v:
             before = edge_coord(self.layout.zones[edges_v[0][0]], edges_v[0][1])
@@ -1080,52 +1267,56 @@ class WindowerApp:
             self._layout_changed(live=live, adjusted=True if changed else None)
 
     def _layout_changed(self, live: bool, skip: int | None = None, adjusted: bool | None = True) -> None:
-        """Zones were resized: redraw, move the real windows, refresh handles."""
+        """Zones of the current monitor were resized: redraw, move the real windows, refresh handles."""
         if adjusted is not None:
             self.layout_adjusted = self.layout_adjusted or adjusted
         if self._already_applied():
             self._place_all(fast=live, skip=skip)
         self.draw_preview()
         if live:
-            if self.handles.visible:
-                self.handles.reposition(self.layout.zones)
+            if self.handles[self.cur].visible:
+                self.handles[self.cur].reposition(self.layout.zones)
         else:
             self._refresh_layouts()
             self.root.after_idle(self._refresh_handles)
             if self.selected_zone is not None:
                 self._select_zone(self.selected_zone)
 
-    def _place_all(self, fast: bool, skip: int | None = None) -> None:
-        for i, s in enumerate(self.slots):
+    def _place_all(self, fast: bool, skip: int | None = None, m: int | None = None) -> None:
+        m = self.cur if m is None else m
+        for i, s in enumerate(self.screens[m].slots):
             if not s or s.hwnd == skip or not self.be.is_window(s.hwnd):
                 continue
-            target = self._target(i)
+            target = self._target(i, m)
             if fast and self.be.get_rect(s.hwnd).close_to(target, 1):
                 continue
             self._remember(s.hwnd)
             self.be.place(s.hwnd, target, fast=fast)
 
-    def _handle_drag(self, edges_v: list, edges_h: list, x_root: int, y_root: int, finished: bool) -> None:
+    def _handle_drag(self, m: int, edges_v: list, edges_h: list, x_root: int, y_root: int,
+                     finished: bool) -> None:
+        self._set_current(m)
         a = self.monitor().work
         self._move_grip(edges_v, edges_h, (x_root - a.x) / a.w, (y_root - a.y) / a.h, live=not finished)
 
     def _handles_toggled(self) -> None:
         self._save_settings()
         self._refresh_handles()
-        if self.handles_var.get() and not self._already_applied():
+        if self.handles_var.get() and not any(self._already_applied(m) for m in range(len(self.screens))):
             self.set_status("Resize handles appear on the desktop once the layout is applied.")
 
     def _refresh_handles(self) -> None:
-        if self.handles.dragging:
+        if any(h.dragging for h in self.handles):
             return
-        if self.handles_var.get() and self._already_applied():
-            self.handles.show(self.layout.zones, self.monitor().work)
-            self.handles.lift()
-        else:
-            self.handles.hide()
+        for m, h in enumerate(self.handles):
+            if self.handles_var.get() and self._already_applied(m):
+                h.show(self.screens[m].layout.zones, self.monitors[m].work)
+                h.lift()
+            else:
+                h.hide()
 
     def _sticky_resize(self, i: int, r: Rect, live: bool, start: Rect | None = None) -> None:
-        """The user resized the window of zone i to r: drag the shared edges along.
+        """The user resized the window of zone i (current monitor) to r: drag the shared edges along.
 
         Only the sides the user actually grabbed (changed since `start`) count, so an
         app that refuses to fit its zone (minimum size) doesn't drag other edges.
@@ -1174,17 +1365,18 @@ class WindowerApp:
         finally:
             self.root.after(EVENT_MS, self._pump_events)
 
-    def _zone_of_hwnd(self, hwnd: int) -> int | None:
-        return next((i for i, s in enumerate(self.slots) if s and s.hwnd == hwnd), None)
+    def _find(self, hwnd: int) -> tuple[int, int] | None:
+        """(monitor, zone) that holds this window."""
+        return next(((m, i) for m, i, s in self._assigned() if s.hwnd == hwnd), None)
 
     def _on_movesize_start(self, hwnd: int) -> None:
         hwnd = self.be.root_window(hwnd)
         if not self.be.is_window(hwnd):
             return
-        zone = self._zone_of_hwnd(hwnd)
-        if zone is not None and hwnd not in self.original:
-            zone = None                       # assigned but never applied: not tiled yet
-        self._movesize = {"hwnd": hwnd, "zone": zone, "start": self.be.get_rect(hwnd), "mode": None}
+        key = self._find(hwnd)
+        if key is not None and hwnd not in self.original:
+            key = None                        # assigned but never applied: not tiled yet
+        self._movesize = {"hwnd": hwnd, "zone": key, "start": self.be.get_rect(hwnd), "mode": None}
 
     def _movesize_poll(self) -> None:
         ms = self._movesize
@@ -1202,11 +1394,16 @@ class WindowerApp:
                 ms["mode"] = "move"
         if ms["mode"] == "resize":
             if ms["zone"] is not None and self.linked_var.get():
-                self._sticky_resize(ms["zone"], r, live=True, start=ms["start"])
+                m, i = ms["zone"]
+                self._set_current(m)          # linked edges work on that monitor's layout
+                self._sticky_resize(i, r, live=True, start=ms["start"])
         elif self.shiftsnap_var.get():
             if self.be.shift_down():
                 if not self.snap_overlay.visible:
-                    self.snap_overlay.show([self._target(i) for i in range(len(self.layout.zones))])
+                    self._snap_keys = [(m, i) for m, scr in enumerate(self.screens)
+                                       for i in range(len(scr.layout.zones))]
+                    self.snap_overlay.show([self._target(i, m) for m, i in self._snap_keys],
+                                           numbers=[i for _m, i in self._snap_keys])
                 self.snap_overlay.highlight(self.snap_overlay.zone_at(*self.be.cursor_pos()))
             elif self.snap_overlay.visible:
                 self.snap_overlay.hide()
@@ -1220,47 +1417,52 @@ class WindowerApp:
         self._movesize = None
         if not ms:
             return
-        target_zone = self.snap_overlay.current if self.snap_overlay.visible else None
+        target = self.snap_overlay.current if self.snap_overlay.visible else None
         self.snap_overlay.hide()
         if ms["mode"] == "resize" and ms["zone"] is not None and self.linked_var.get():
-            self._sticky_resize(ms["zone"], self.be.get_rect(ms["hwnd"]), live=False, start=ms["start"])
+            m, i = ms["zone"]
+            self._set_current(m)
+            self._sticky_resize(i, self.be.get_rect(ms["hwnd"]), live=False, start=ms["start"])
             self.set_status("Resized - neighbouring windows followed. 'Save sizes as...' keeps these proportions.")
-        elif target_zone is not None:
-            self.put_window_in_zone(ms["hwnd"], target_zone)
+        elif target is not None and target < len(self._snap_keys):
+            self.put_window_in_zone(ms["hwnd"], *self._snap_keys[target])
 
-    def put_window_in_zone(self, hwnd: int, zone: int) -> bool:
-        """Snap a (real) window into a zone; if the zone is taken the two windows swap."""
-        if zone is None or zone >= len(self.slots):
+    def put_window_in_zone(self, hwnd: int, m: int, zone: int) -> bool:
+        """Snap a (real) window into zone `zone` of monitor m; if the zone is taken the two windows swap."""
+        if not 0 <= m < len(self.screens) or zone is None or zone >= len(self.screens[m].slots):
             return False
         wins = {w.hwnd: w for w in self.be.list_windows()}
         win = wins.get(hwnd)
         if not win:
             return False
         self.windows = list(wins.values())
-        old = self._zone_of_hwnd(hwnd)
-        if old == zone:
-            self._place_all(fast=False)
+        old = self._find(hwnd)
+        if old == (m, zone):
+            self._place_all(fast=False, m=m)
             return True
-        displaced = self.slots[zone]
+        dest = self.screens[m].slots
+        displaced = dest[zone]
         new_slot = Slot.from_window(win)
         if old is not None:
-            new_slot.topmost = self.slots[old].topmost
-            self.slots[old] = displaced
+            om, oi = old
+            new_slot.topmost = self.screens[om].slots[oi].topmost
+            self.screens[om].slots[oi] = displaced
         elif displaced and displaced.topmost and self.be.is_window(displaced.hwnd):
             self.be.set_topmost(displaced.hwnd, False)
-        self.slots[zone] = new_slot
+        dest[zone] = new_slot
         for h in {hwnd} | ({displaced.hwnd} if displaced and old is not None else set()):
             if self.be.is_window(h):
                 self._remember(h)
-        for i in {zone, old} - {None}:
-            s = self.slots[i]
+        for km, ki in {(m, zone), old} - {None}:
+            s = self.screens[km].slots[ki]
             if s and self.be.is_window(s.hwnd):
-                self.be.place(s.hwnd, self._target(i))
+                self.be.place(s.hwnd, self._target(ki, km))
                 self.be.set_topmost(s.hwnd, s.topmost)
+        self._set_current(m)
         self._select_zone(zone)
         self.refresh_windows(force=True)
         self._refresh_handles()
-        self.set_status(f"Snapped {win.app} into zone {zone + 1}" +
+        self.set_status(f"Snapped {win.app} into {self._zone_name(m, zone)}" +
                         (f" (swapped with {_short_app(displaced.exe)})" if displaced and old is not None else "."))
         return True
 
@@ -1285,75 +1487,77 @@ class WindowerApp:
                 row=r, column=0, sticky="w", padx=(0, 16), pady=2)
             tk.Label(t, text=what, bg=BG, fg=FG).grid(row=r, column=1, sticky="w", pady=2)
         tips = ("Linked edges: drag the border between two tiled windows and the neighbour follows.\n"
-                "Resize handles: grips on the lines/intersections between windows on the desktop.")
+                "Resize handles: grips on the lines/intersections between windows on the desktop.\n"
+                "With several monitors, zone numbers refer to the monitor the active window is on.")
         tk.Label(t, text=tips, bg=BG, fg=MUTED, justify="left").grid(
             row=99, column=0, columnspan=2, sticky="w", pady=(10, 0))
         ttk.Button(t, text="Close", command=t.destroy).grid(row=100, column=1, sticky="e", pady=(10, 0))
 
-    def _active_zone(self) -> int | None:
+    def _active_zone(self) -> tuple[int, int] | None:
         fg = self.be.foreground()
-        return self._zone_of_hwnd(self.be.root_window(fg)) if fg else None
+        return self._find(self.be.root_window(fg)) if fg else None
 
-    def neighbour(self, i: int, direction: str) -> int | None:
-        zs = self.layout.zones
-        a = zs[i]
-        best, best_score = None, None
-        for j, b in enumerate(zs):
-            if j == i:
-                continue
-            if direction in ("left", "right"):
-                gap = (a.x - (b.x + b.w)) if direction == "left" else (b.x - (a.x + a.w))
-                along = (b.x + b.w / 2) < (a.x + a.w / 2) if direction == "left" else (b.x + b.w / 2) > (a.x + a.w / 2)
-                overlap = min(a.y + a.h, b.y + b.h) - max(a.y, b.y)
-                perp = 0 if overlap > 0 else abs((b.y + b.h / 2) - (a.y + a.h / 2))
-            else:
-                gap = (a.y - (b.y + b.h)) if direction == "up" else (b.y - (a.y + a.h))
-                along = (b.y + b.h / 2) < (a.y + a.h / 2) if direction == "up" else (b.y + b.h / 2) > (a.y + a.h / 2)
-                overlap = min(a.x + a.w, b.x + b.w) - max(a.x, b.x)
-                perp = 0 if overlap > 0 else abs((b.x + b.w / 2) - (a.x + a.w / 2))
-            if not along:
-                continue
-            score = max(gap, 0) + 2 * perp - 0.001 * max(overlap, 0)
-            if best_score is None or score < best_score:
-                best, best_score = j, score
-        return best
+    def _screen_here(self) -> int:
+        """The monitor the user is working on: the one the active window is on (else the panel's)."""
+        fg = self.be.foreground()
+        if not fg:
+            return self.cur
+        hwnd = self.be.root_window(fg)
+        key = self._find(hwnd)
+        if key is not None:
+            return key[0]
+        if hwnd == self.be.root_window(self.root.winfo_id()) or not self.be.is_window(hwnd):
+            return self.cur
+        r = self.be.get_rect(hwnd)
+        k = monitor_at(self.monitors, r.x + r.w // 2, r.y + r.h // 2)
+        return self.cur if k is None else k
 
     def _on_hotkey(self, hid: int) -> None:
         if hid not in hotkeys.ACTIONS:
             return
         action, arg = hotkeys.ACTIONS[hid][:2]
-        n = len(self.slots)
         if action == "focus_zone":
-            if arg < n and self._slot_alive(arg):
-                self.be.focus(self.slots[arg].hwnd)
+            m = self._screen_here()
+            if arg < len(self.screens[m].slots) and self._slot_alive(arg, m):
+                self.be.focus(self.screens[m].slots[arg].hwnd)
+                self._set_current(m)
                 self._select_zone(arg)
         elif action == "move_to_zone":
             fg = self.be.root_window(self.be.foreground() or 0)
-            if arg < n and fg and not self.put_window_in_zone(fg, arg):
+            m = self._screen_here()
+            if arg < len(self.screens[m].slots) and fg and not self.put_window_in_zone(fg, m, arg):
                 self.set_status("That window can't be tiled (it may be Windower itself or a system window).",
                                 warn=True)
         elif action in ("focus_dir", "swap_dir"):
             cur = self._active_zone()
             if cur is None:
-                # the active window isn't tiled: arrows just jump into the tiled set
-                k = self.selected_zone if self.selected_zone is not None else 0
-                if action == "focus_dir" and k < n and self._slot_alive(k):
-                    self.be.focus(self.slots[k].hwnd)
+                # the active window isn't tiled: arrows just jump into the tiled set on this monitor
+                m = self._screen_here()
+                k = self.screens[m].selected or 0
+                if action == "focus_dir" and self._slot_alive(k, m):
+                    self.be.focus(self.screens[m].slots[k].hwnd)
                 return
-            j = self.neighbour(cur, arg)
+            # zones of every monitor, in desktop pixels: arrows cross from one monitor to the next
+            keys = [(m, i) for m, scr in enumerate(self.screens) for i in range(len(scr.layout.zones))]
+            j = neighbour([self._target(i, m) for m, i in keys], keys.index(cur), arg)
             if j is None:
                 return
+            (cm, ci), (jm, ji) = cur, keys[j]
             if action == "focus_dir":
-                if self._slot_alive(j):
-                    self.be.focus(self.slots[j].hwnd)
-                    self._select_zone(j)
+                if self._slot_alive(ji, jm):
+                    self.be.focus(self.screens[jm].slots[ji].hwnd)
+                    self._set_current(jm)
+                    self._select_zone(ji)
             else:
-                self.slots[cur], self.slots[j] = self.slots[j], self.slots[cur]
-                for k in (cur, j):
-                    s = self.slots[k]
+                a, b = self.screens[cm].slots, self.screens[jm].slots
+                a[ci], b[ji] = b[ji], a[ci]
+                for km, ki in (cur, keys[j]):
+                    s = self.screens[km].slots[ki]
                     if s and self.be.is_window(s.hwnd):
-                        self.be.place(s.hwnd, self._target(k))
-                self._select_zone(j)
+                        self._remember(s.hwnd)
+                        self.be.place(s.hwnd, self._target(ki, km))
+                self._set_current(jm)
+                self._select_zone(ji)
         elif action == "apply":
             self.apply()
         elif action == "toggle_panel":
@@ -1368,7 +1572,6 @@ class WindowerApp:
             self._handles_toggled()
         elif action == "show_zones":
             self.identify()
-
 
 
 def _short_app(exe: str) -> str:

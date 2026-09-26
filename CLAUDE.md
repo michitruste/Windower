@@ -18,6 +18,12 @@ The user has customised: title "Windower (michi's version)" and trimmed presets 
 - **Global hotkeys**: RegisterHotKey on the event thread; the modifier is selectable (Ctrl+Alt by default). The table is in hotkeys.py (ids 1-9 focus, 11-19 move, 20-27 arrows focus/swap, 30 apply, 31 panel, 32 handles, 33 zones).
 - The fake backend (fakewin.py) mirrors all of this. /tmp scripted GUI tests covered node, divider, sticky resize, pinned edges, snap and swap, hotkeys, handles and the editor.
 
+## Per-monitor layouts
+- **model.Screen** = layout + slots + adjusted + selected, one per monitor (`app.screens`, same order as get_monitors()). `app.cur` is the monitor the panel edits; `layout`, `slots`, `layout_adjusted` and `selected_zone` are properties on screens[cur], so single-screen code (layout dropdown, editor, zone bar, grips) is unchanged. Anything that spans monitors uses `_assigned()` -> (m, i, slot), `_target(i, m)`, `_slot_alive(i, m)` and `_find(hwnd)` -> (m, i).
+- **Preview**: all monitors are drawn in their real arrangement (work areas, 8 px separation). `_zone_at` returns (m, i); clicking, dropping or dragging a grip switches `cur` via `_set_current`. Desktop drags (sticky resize, desktop handles) also switch `cur` to that monitor.
+- **apply(only=set)** arranges every screen or a subset. There's one DesktopHandles per monitor. The snap overlay shows every monitor's zones (`_snap_keys`). Hotkeys use `_screen_here()` (the monitor of the active window). Arrows use model.neighbour on pixel rects, so they cross monitors.
+- **Settings**: `screen_layouts` = layout name per monitor. **Workspaces**: `screens: [{monitor, device, layout, slots}]`, matched by device name, then index. The old keys (`layout`, `slots`) are still written, and old one-monitor workspaces load onto their monitor only.
+
 ## App icons
 - **Icons**: WM_GETICON (SendMessageTimeout, 100 ms), then the class icon, then PrivateExtractIconsW on the exe. Drawn with DrawIconEx on black and on white to recover alpha for any icon type (icons.rgba_from_black_white), encoded as PNG with zlib/struct for Tk. They're cached per hwnd in ui_common.IconCache.
 
@@ -25,4 +31,4 @@ The user has customised: title "Windower (michi's version)" and trimmed presets 
 - Unit tests (15) and a headless GUI flow with the fake backend pass. The real Win32 path (hooks, hotkeys, async placement) has not yet been confirmed on the user's machine.
 
 ## Next ideas
-A tray icon and autostart, different layouts on each monitor at the same time.
+A tray icon and autostart.

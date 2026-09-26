@@ -39,11 +39,28 @@ To try the interface with fake windows (nothing on your desktop moves), run `pyt
 | **Always on top** | Keeps that window above the others. Handy for a video or chat |
 | **Keep windows in place** | If a window gets moved or maximized, it goes back to its zone within about 1 second |
 | **Gap px** | Space between the windows |
-| **Monitor** | Which screen the layout goes on (each monitor uses its own work area, so the taskbar isn't covered) |
+| **Monitor** | Which screen the panel is editing (see *Several monitors* below). Each monitor uses its own work area, so the taskbar isn't covered |
 | **Bring all to front** | Brings all the tiled windows back above whatever is covering them |
 | **Show zones on screen** | Flashes numbered overlays on the real monitor |
 | **Restore original positions** | Puts every window back where it was before Windower moved it |
 | App icons | The *Open windows* list, the zones and the drag label show each app's icon |
+
+### Several monitors
+
+Every monitor has its **own layout and its own windows**, all active at the same time. For example,
+you can have *Big left + 2 stacked* on a laptop screen and *Grid 2x2* on an external monitor.
+
+- The preview shows all your monitors side by side, arranged the way Windows has them. The monitor
+  you're editing has a blue frame and a blue *Monitor N* tag.
+- Clicking a zone, or dropping a window on it, switches the panel to that monitor. The **Layout**
+  dropdown, the zone bar, **Auto-fill zones** and **Clear all zones** then work on that monitor.
+  The **Monitor** dropdown does the same and also shows each monitor's layout.
+- Drag one zone onto a zone of another monitor to swap the two windows between screens.
+- **Apply layout**, **Keep windows in place**, **Show zones**, **Bring all to front**, the desktop
+  resize handles and Shift-drag snapping cover every monitor at once.
+- Hotkeys work on the monitor of the active window: `Ctrl+Alt+1` focuses zone 1 *of that screen*.
+  The arrow hotkeys cross from one monitor to the next.
+- Workspaces remember every monitor. If a saved monitor isn't connected, the rest still load.
 
 ### Linked edges, dividers and nodes (no gaps, ever)
 
@@ -109,7 +126,7 @@ picture-in-picture setup, and turn on *Always on top* for that zone.
 
 ### Workspaces
 
-**Save current as...** remembers the layout, the monitor, the gap and *which app goes in which zone*.
+**Save current as...** remembers the layout of every monitor, the gap and *which app goes in which zone*.
 Later, **Load** finds those apps again (by program and window title) and arranges them.
 With **Launch missing apps** checked, it also starts apps that aren't running and places
 their windows once they open.
@@ -133,18 +150,19 @@ Your layouts, workspaces and settings are stored in `%APPDATA%\Windower\config.j
 main.py                 entry point  (--demo for simulated windows)
 Windower.pyw            double-click launcher without console
 windower_app/
-  win32.py              Win32 API via ctypes: windows/monitors, move, focus, topmost,
+  win32.py              Win32 API via ctypes: windows/monitors, move, focus, topmost, icons,
                         move/resize event hook + global hotkeys (background thread)
   fakewin.py            simulated desktop (demo mode + tests)
   backend.py            picks win32 or fake
-  model.py              Rect, Zone, Layout, Slot, window matching, dividers/nodes geometry
+  model.py              Rect, Zone, Layout, Slot, Screen, window matching, dividers/nodes geometry
   desktop.py            on-screen snap overlay and resize handles
   hotkeys.py            hotkey table
   presets.py            built-in layouts
   storage.py            JSON persistence
   editor.py             custom layout editor
   app.py                control panel
-  ui_common.py          colors, on-screen overlay
+  icons.py              icon pixels -> PNG (no Pillow needed)
+  ui_common.py          colors, on-screen overlay, icon cache
 tests/test_core.py      python -m unittest discover tests
 ```
 
@@ -152,4 +170,3 @@ tests/test_core.py      python -m unittest discover tests
 
 - Live DWM thumbnails of each window inside the preview
 - A tray icon and start with Windows
-- Per-monitor layouts (a different layout on each screen at the same time)

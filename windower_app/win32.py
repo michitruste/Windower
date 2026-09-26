@@ -12,7 +12,7 @@ import os
 import subprocess
 from ctypes import wintypes
 
-from .model import Monitor, Rect, WindowInfo
+from .model import Monitor, Placement, Rect, WindowInfo
 
 NAME = "win32"
 
@@ -36,6 +36,8 @@ SW_RESTORE = 9
 SW_SHOW = 5
 SW_MINIMIZE = 6
 SW_SHOWNOACTIVATE = 4
+SW_SHOWMAXIMIZED = 3
+WPF_RESTORETOMAXIMIZED = 0x0002
 
 SWP_NOSIZE = 0x0001
 SWP_NOMOVE = 0x0002
@@ -84,6 +86,17 @@ class MONITORINFOEXW(ctypes.Structure):
     ]
 
 
+class WINDOWPLACEMENT(ctypes.Structure):
+    _fields_ = [
+        ("length", wintypes.UINT),
+        ("flags", wintypes.UINT),
+        ("showCmd", wintypes.UINT),
+        ("ptMinPosition", wintypes.POINT),
+        ("ptMaxPosition", wintypes.POINT),
+        ("rcNormalPosition", wintypes.RECT),
+    ]
+
+
 def _proto(fn, restype, *argtypes):
     fn.restype = restype
     fn.argtypes = argtypes
@@ -114,6 +127,8 @@ _proto(user32.EnumDisplayMonitors, wintypes.BOOL, wintypes.HDC, ctypes.POINTER(w
        MONITORENUMPROC, wintypes.LPARAM)
 _proto(user32.GetMonitorInfoW, wintypes.BOOL, wintypes.HMONITOR, ctypes.POINTER(MONITORINFOEXW))
 _proto(user32.GetAncestor, wintypes.HWND, wintypes.HWND, wintypes.UINT)
+_proto(user32.GetWindowPlacement, wintypes.BOOL, wintypes.HWND, ctypes.POINTER(WINDOWPLACEMENT))
+_proto(user32.SetWindowPlacement, wintypes.BOOL, wintypes.HWND, ctypes.POINTER(WINDOWPLACEMENT))
 _proto(kernel32.GetCurrentThreadId, wintypes.DWORD)
 _proto(kernel32.OpenProcess, wintypes.HANDLE, wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
 _proto(kernel32.CloseHandle, wintypes.BOOL, wintypes.HANDLE)
@@ -335,6 +350,37 @@ def place(hwnd: int, target: Rect, fast: bool = False) -> bool:
         if get_rect(hwnd).close_to(target, 2):
             break
     return ok
+
+
+def save_placement(hwnd: int) -> Placement:
+    """Remember where a window is so restore_placement() can put it back.
+
+    A minimized window's rect is Windows' off-screen parking spot (-32000, -32000);
+    moving it back there would leave it open but invisible and unreachable. So for
+    minimized and maximized windows the WINDOWPLACEMENT (normal rect + state) is kept.
+    """
+    iconic, zoomed = bool(user32.IsIconic(hwnd)), bool(user32.IsZoomed(hwnd))
+    if not iconic and not zoomed:
+        return Placement(_frame_rect(hwnd))
+    wp = WINDOWPLACEMENT()
+    wp.length = ctypes.sizeof(WINDOWPLACEMENT)
+    if user32.GetWindowPlacement(hwnd, ctypes.byref(wp)):
+        return Placement(None, zoomed or bool(wp.flags & WPF_RESTORETOMAXIMIZED), bytes(wp))
+    return Placement(None if iconic else _frame_rect(hwnd))
+
+
+def restore_placement(hwnd: int, p: Placement) -> bool:
+    """Undo Windower's moves. A window that was minimized comes back un-minimized
+    (maximized if that's what it was before minimizing), not hidden again."""
+    if not is_window(hwnd):
+        return False
+    if p.native is None:
+        return place(hwnd, p.rect) if p.rect else False
+    wp = WINDOWPLACEMENT.from_buffer_copy(p.native)
+    wp.length = ctypes.sizeof(WINDOWPLACEMENT)
+    wp.flags = 0
+    wp.showCmd = SW_SHOWMAXIMIZED if p.maximized else SW_SHOWNOACTIVATE
+    return bool(user32.SetWindowPlacement(hwnd, ctypes.byref(wp)))
 
 
 def focus(hwnd: int) -> None:

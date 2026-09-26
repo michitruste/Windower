@@ -6,9 +6,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from windower_app import hotkeys  # noqa: E402
-from windower_app.model import (MIN_ZONE, Layout, Rect, WindowInfo, Zone, dividers, edge_group,  # noqa: E402
-                                 match_window, move_edges, node_edges, nodes)
+from windower_app import fakewin, hotkeys  # noqa: E402
+from windower_app.model import (MIN_ZONE, Layout, Monitor, Rect, WindowInfo, Zone, dividers,  # noqa: E402
+                                 edge_group, fit_on_screen, match_window, move_edges, node_edges,
+                                 nodes)
 from windower_app.presets import PRESETS  # noqa: E402
 from windower_app.storage import Store  # noqa: E402
 
@@ -171,6 +172,31 @@ class StoreTests(unittest.TestCase):
             p = Path(d) / "config.json"
             p.write_text("{not json")
             self.assertEqual(Store(p).layouts, [])
+
+
+class RestoreTests(unittest.TestCase):
+    MONITORS = [Monitor("A", Rect(0, 0, 1920, 1080), AREA, True),
+                Monitor("B", Rect(1920, 0, 2560, 1440), Rect(1920, 0, 2560, 1400))]
+
+    def test_on_screen_rect_is_kept(self):
+        for r in (Rect(100, 100, 800, 600), Rect(1800, 50, 900, 700), Rect(-700, 10, 800, 600)):
+            self.assertEqual(fit_on_screen(r, self.MONITORS), r)
+
+    def test_off_screen_rect_comes_back(self):
+        for r in (Rect(-32000, -32000, 160, 28), Rect(9000, 200, 800, 600), Rect(0, 5000, 3000, 2000)):
+            f = fit_on_screen(r, self.MONITORS)
+            self.assertTrue(AREA.x <= f.x and f.x + f.w <= AREA.x + AREA.w, r)
+            self.assertTrue(AREA.y <= f.y and f.y + f.h <= AREA.y + AREA.h, r)
+
+    def test_minimized_window_is_not_restored_to_parking_spot(self):
+        hwnd, before = 1030, fakewin.get_rect(1030)
+        fakewin.minimize(hwnd)
+        saved = fakewin.save_placement(hwnd)
+        self.assertIsNone(saved.rect)
+        fakewin.place(hwnd, Rect(0, 0, 960, 1040))          # tiled by Windower
+        fakewin.restore_placement(hwnd, saved)
+        self.assertEqual(fakewin.get_rect(hwnd), before)
+        self.assertFalse(fakewin.is_minimized(hwnd))
 
 
 if __name__ == "__main__":

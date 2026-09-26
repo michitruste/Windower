@@ -29,6 +29,30 @@ class Monitor:
 
 
 @dataclass(frozen=True)
+class Placement:
+    """Where a window was before Windower first moved it (see backend save_placement)."""
+    rect: Rect | None         # visible frame of a normal window; None if minimized/maximized
+    maximized: bool = False   # put it back maximized
+    native: object = None     # backend data that undoes a minimized/maximized state exactly
+
+
+def fit_on_screen(rect: Rect, monitors: list[Monitor], grip: int = 60) -> Rect:
+    """rect as is if a grip-sized piece of it is on some monitor; otherwise moved (and shrunk
+    if needed) onto the primary monitor, so a window can never end up unreachable."""
+    for m in monitors:
+        a = m.work
+        iw = min(rect.x + rect.w, a.x + a.w) - max(rect.x, a.x)
+        ih = min(rect.y + rect.h, a.y + a.h) - max(rect.y, a.y)
+        if iw >= min(grip, rect.w) and ih >= min(grip, rect.h):
+            return rect
+    if not monitors:
+        return rect
+    a = next((m for m in monitors if m.primary), monitors[0]).work
+    w, h = min(rect.w, a.w), min(rect.h, a.h)
+    return Rect(a.x + (a.w - w) // 2, a.y + (a.h - h) // 2, w, h)
+
+
+@dataclass(frozen=True)
 class WindowInfo:
     hwnd: int
     title: str

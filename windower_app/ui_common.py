@@ -1,8 +1,10 @@
 """Shared GUI bits: colours, on-screen zone overlay, small helpers."""
 from __future__ import annotations
 
+import base64
 import tkinter as tk
 
+from .icons import png_bytes
 from .model import Layout, Rect
 
 BG = "#1e1f24"
@@ -43,6 +45,36 @@ def set_cursor(widget: tk.Widget, *names: str) -> None:
 
 def geometry(r: Rect) -> str:
     return f"{r.w}x{r.h}+{r.x}+{r.y}"
+
+
+class IconCache:
+    """Window icons as Tk images, fetched once per window."""
+
+    def __init__(self, root: tk.Misc, backend, size: int):
+        self.root = root
+        self.be = backend
+        self.size = size
+        self.blank = tk.PhotoImage(master=root, width=size, height=size)  # keeps rows aligned
+        self._icons: dict[int, tk.PhotoImage | None] = {}
+
+    def get(self, hwnd: int) -> tk.PhotoImage | None:
+        if hwnd not in self._icons:
+            img = None
+            try:
+                rgba = self.be.window_icon(hwnd, self.size)
+                if rgba:
+                    data = base64.b64encode(png_bytes(self.size, self.size, rgba)).decode("ascii")
+                    img = tk.PhotoImage(master=self.root, data=data, format="png")
+            except (OSError, ValueError, tk.TclError):
+                img = None
+            self._icons[hwnd] = img
+        return self._icons[hwnd]
+
+    def prune(self, keep: set[int]) -> None:
+        """Forget icons of windows that were closed (hwnds get reused)."""
+        for h in list(self._icons):
+            if h not in keep:
+                del self._icons[h]
 
 
 class Overlay:

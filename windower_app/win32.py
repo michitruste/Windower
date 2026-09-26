@@ -3,7 +3,7 @@ Thin Win32 layer built only on ctypes (no pywin32 needed).
 
 Everything the app does to *real* windows goes through this module:
 listing top-level windows, listing monitors, moving/resizing, focusing,
-always-on-top, minimise/restore.
+always-on-top, minimise/restore, live DWM thumbnails and window icons.
 """
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ import os
 import subprocess
 from ctypes import wintypes
 
+from .icons import rgba_from_black_white
 from .model import Monitor, Placement, Rect, WindowInfo
 
 NAME = "win32"
@@ -452,6 +453,194 @@ def launch(exe_path: str) -> bool:
         return True
     except OSError:
         return False
+
+
+# --------------------------------------------------------------------------
+# live thumbnails (DWM) and window icons
+# --------------------------------------------------------------------------
+HAS_THUMBNAILS = True
+
+DWM_TNP_RECTDESTINATION = 0x01
+DWM_TNP_OPACITY = 0x04
+DWM_TNP_VISIBLE = 0x08
+DWM_TNP_SOURCECLIENTAREAONLY = 0x10
+
+WM_GETICON = 0x007F
+ICON_SMALL, ICON_BIG, ICON_SMALL2 = 0, 1, 2
+GCLP_HICON, GCLP_HICONSM = -14, -34
+SMTO_ABORTIFHUNG = 0x0002
+DI_NORMAL = 0x0003
+
+gdi32 = ctypes.WinDLL("gdi32")
+
+
+class DWM_THUMBNAIL_PROPERTIES(ctypes.Structure):
+    _fields_ = [
+        ("dwFlags", wintypes.DWORD),
+        ("rcDestination", wintypes.RECT),
+        ("rcSource", wintypes.RECT),
+        ("opacity", ctypes.c_ubyte),
+        ("fVisible", wintypes.BOOL),
+        ("fSourceClientAreaOnly", wintypes.BOOL),
+    ]
+
+
+class BITMAPINFOHEADER(ctypes.Structure):
+    _fields_ = [
+        ("biSize", wintypes.DWORD),
+        ("biWidth", wintypes.LONG),
+        ("biHeight", wintypes.LONG),
+        ("biPlanes", wintypes.WORD),
+        ("biBitCount", wintypes.WORD),
+        ("biCompression", wintypes.DWORD),
+        ("biSizeImage", wintypes.DWORD),
+        ("biXPelsPerMeter", wintypes.LONG),
+        ("biYPelsPerMeter", wintypes.LONG),
+        ("biClrUsed", wintypes.DWORD),
+        ("biClrImportant", wintypes.DWORD),
+    ]
+
+
+_proto(dwmapi.DwmRegisterThumbnail, ctypes.c_long, wintypes.HWND, wintypes.HWND, ctypes.POINTER(wintypes.HANDLE))
+_proto(dwmapi.DwmUnregisterThumbnail, ctypes.c_long, wintypes.HANDLE)
+_proto(dwmapi.DwmUpdateThumbnailProperties, ctypes.c_long, wintypes.HANDLE,
+       ctypes.POINTER(DWM_THUMBNAIL_PROPERTIES))
+_proto(user32.GetClientRect, wintypes.BOOL, wintypes.HWND, ctypes.POINTER(wintypes.RECT))
+_proto(user32.ScreenToClient, wintypes.BOOL, wintypes.HWND, ctypes.POINTER(wintypes.POINT))
+_proto(user32.SendMessageTimeoutW, wintypes.LPARAM, wintypes.HWND, wintypes.UINT, wintypes.WPARAM,
+       wintypes.LPARAM, wintypes.UINT, wintypes.UINT, ctypes.POINTER(ctypes.c_size_t))
+_proto(user32.DrawIconEx, wintypes.BOOL, wintypes.HDC, ctypes.c_int, ctypes.c_int, wintypes.HICON,
+       ctypes.c_int, ctypes.c_int, wintypes.UINT, wintypes.HBRUSH, wintypes.UINT)
+_proto(user32.DestroyIcon, wintypes.BOOL, wintypes.HICON)
+_proto(user32.PrivateExtractIconsW, wintypes.UINT, wintypes.LPCWSTR, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+       ctypes.POINTER(wintypes.HICON), ctypes.POINTER(wintypes.UINT), wintypes.UINT, wintypes.UINT)
+_proto(gdi32.CreateCompatibleDC, wintypes.HDC, wintypes.HDC)
+_proto(gdi32.CreateDIBSection, wintypes.HBITMAP, wintypes.HDC, ctypes.POINTER(BITMAPINFOHEADER), wintypes.UINT,
+       ctypes.POINTER(ctypes.c_void_p), wintypes.HANDLE, wintypes.DWORD)
+_proto(gdi32.SelectObject, wintypes.HGDIOBJ, wintypes.HDC, wintypes.HGDIOBJ)
+_proto(gdi32.DeleteObject, wintypes.BOOL, wintypes.HGDIOBJ)
+_proto(gdi32.DeleteDC, wintypes.BOOL, wintypes.HDC)
+_proto(gdi32.GdiFlush, wintypes.BOOL)
+
+if ctypes.sizeof(ctypes.c_void_p) == 8:
+    _GetClassLong = _proto(user32.GetClassLongPtrW, ctypes.c_size_t, wintypes.HWND, ctypes.c_int)
+else:  # pragma: no cover - 32-bit Python
+    _GetClassLong = _proto(user32.GetClassLongW, wintypes.DWORD, wintypes.HWND, ctypes.c_int)
+
+
+class Thumbnail:
+    """A live copy of window `src` that DWM draws on top of our window `dest`.
+
+    Nothing is captured or copied by us: the compositor keeps it in sync (video,
+    typing, scrolling) the same way the taskbar hover previews work.
+    """
+
+    def __init__(self, dest: int, src: int):
+        self.dest = root_window(dest)
+        self.src = src
+        h = wintypes.HANDLE()
+        hr = dwmapi.DwmRegisterThumbnail(self.dest, src, ctypes.byref(h))
+        if hr != 0 or not h.value:
+            raise OSError(f"DwmRegisterThumbnail failed (0x{hr & 0xFFFFFFFF:08x})")
+        self._h = h.value
+
+    def source_size(self) -> tuple[int, int] | None:
+        """Size of the source's client area (the part the thumbnail shows)."""
+        r = wintypes.RECT()
+        if not user32.GetClientRect(self.src, ctypes.byref(r)) or r.right <= 0 or r.bottom <= 0:
+            return None
+        return r.right, r.bottom
+
+    def show(self, rect: Rect, opacity: int = 255) -> None:
+        """Draw the thumbnail at rect (screen coordinates)."""
+        p = wintypes.POINT(rect.x, rect.y)
+        user32.ScreenToClient(self.dest, ctypes.byref(p))
+        props = DWM_THUMBNAIL_PROPERTIES()
+        props.dwFlags = (DWM_TNP_RECTDESTINATION | DWM_TNP_OPACITY | DWM_TNP_VISIBLE
+                         | DWM_TNP_SOURCECLIENTAREAONLY)
+        props.rcDestination = wintypes.RECT(p.x, p.y, p.x + rect.w, p.y + rect.h)
+        props.opacity = max(0, min(255, opacity))
+        props.fVisible = True
+        props.fSourceClientAreaOnly = True
+        self._update(props)
+
+    def hide(self) -> None:
+        props = DWM_THUMBNAIL_PROPERTIES()
+        props.dwFlags = DWM_TNP_VISIBLE
+        props.fVisible = False
+        self._update(props)
+
+    def close(self) -> None:
+        if self._h:
+            dwmapi.DwmUnregisterThumbnail(self._h)
+            self._h = 0
+
+    def _update(self, props: DWM_THUMBNAIL_PROPERTIES) -> None:
+        if self._h:
+            dwmapi.DwmUpdateThumbnailProperties(self._h, ctypes.byref(props))
+
+
+def _hicon(hwnd: int, size: int) -> tuple[int, bool]:
+    """(HICON, owned) for a window: its own icon, its class icon, or its exe's icon.
+    Owned icons were created for us and must be destroyed."""
+    small = size <= 16
+    for kind in ((ICON_SMALL2, ICON_SMALL, ICON_BIG) if small else (ICON_BIG, ICON_SMALL2, ICON_SMALL)):
+        res = ctypes.c_size_t(0)
+        # timeout: a hung app must never freeze Windower
+        if user32.SendMessageTimeoutW(hwnd, WM_GETICON, kind, 0, SMTO_ABORTIFHUNG, 100,
+                                      ctypes.byref(res)) and res.value:
+            return res.value, False
+    for idx in ((GCLP_HICONSM, GCLP_HICON) if small else (GCLP_HICON, GCLP_HICONSM)):
+        h = _GetClassLong(hwnd, idx)
+        if h:
+            return h, False
+    path = _exe_path(_pid(hwnd))
+    if path:
+        h = wintypes.HICON()
+        n = user32.PrivateExtractIconsW(path, 0, size, size, ctypes.byref(h), None, 1, 0)
+        if n and n != 0xFFFFFFFF and h.value:
+            return h.value, True
+    return 0, False
+
+
+def _render_icon(hicon: int, size: int) -> bytes | None:
+    bmi = BITMAPINFOHEADER()
+    bmi.biSize = ctypes.sizeof(BITMAPINFOHEADER)
+    bmi.biWidth, bmi.biHeight = size, -size  # negative height = rows top-down
+    bmi.biPlanes, bmi.biBitCount = 1, 32
+    dc = gdi32.CreateCompatibleDC(None)
+    bits = ctypes.c_void_p()
+    bmp = gdi32.CreateDIBSection(dc, ctypes.byref(bmi), 0, ctypes.byref(bits), None, 0)
+    if not bmp or not bits.value:
+        gdi32.DeleteDC(dc)
+        return None
+    old = gdi32.SelectObject(dc, bmp)
+    n = size * size * 4
+    shots = []
+    try:
+        for bg in (0x00, 0xFF):
+            ctypes.memset(bits, bg, n)
+            if not user32.DrawIconEx(dc, 0, 0, hicon, size, size, 0, None, DI_NORMAL):
+                return None
+            gdi32.GdiFlush()
+            shots.append(ctypes.string_at(bits, n))
+    finally:
+        gdi32.SelectObject(dc, old)
+        gdi32.DeleteObject(bmp)
+        gdi32.DeleteDC(dc)
+    return rgba_from_black_white(*shots)
+
+
+def window_icon(hwnd: int, size: int) -> bytes | None:
+    """The window's icon as size x size RGBA pixels, or None if it has none."""
+    hicon, owned = _hicon(hwnd, size)
+    if not hicon:
+        return None
+    try:
+        return _render_icon(hicon, size)
+    finally:
+        if owned:
+            user32.DestroyIcon(hicon)
 
 
 # --------------------------------------------------------------------------

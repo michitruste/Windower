@@ -7,9 +7,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from windower_app import fakewin, hotkeys  # noqa: E402
+from windower_app.icons import png_bytes, rgba_from_black_white  # noqa: E402
 from windower_app.model import (MIN_ZONE, Layout, Monitor, Rect, WindowInfo, Zone, dividers,  # noqa: E402
-                                 edge_group, fit_on_screen, match_window, move_edges, node_edges,
-                                 nodes)
+                                 edge_group, fit_aspect, fit_on_screen, match_window, move_edges,
+                                 node_edges, nodes)
 from windower_app.presets import PRESETS  # noqa: E402
 from windower_app.storage import Store  # noqa: E402
 
@@ -197,6 +198,35 @@ class RestoreTests(unittest.TestCase):
         fakewin.restore_placement(hwnd, saved)
         self.assertEqual(fakewin.get_rect(hwnd), before)
         self.assertFalse(fakewin.is_minimized(hwnd))
+
+
+class PreviewTests(unittest.TestCase):
+    def test_fit_aspect_keeps_proportions_and_centres(self):
+        box = Rect(10, 20, 400, 300)
+        self.assertEqual(fit_aspect(box, 1920, 1080), Rect(10, 57, 400, 225))   # letterboxed
+        self.assertEqual(fit_aspect(box, 500, 1000), Rect(135, 20, 150, 300))   # pillarboxed
+        self.assertEqual(fit_aspect(box, 0, 100), box)
+
+    def test_icon_alpha_recovered_from_black_and_white(self):
+        # BGRA pixels: opaque red, 50% blue, fully transparent
+        on_black = bytes([0, 0, 255, 0, 128, 0, 0, 0, 0, 0, 0, 0])
+        on_white = bytes([0, 0, 255, 0, 255, 127, 127, 0, 255, 255, 255, 0])
+        rgba = rgba_from_black_white(on_black, on_white)
+        self.assertEqual(rgba[0:4], bytes([255, 0, 0, 255]))
+        self.assertEqual(rgba[4:8], bytes([0, 0, 255, 128]))
+        self.assertEqual(rgba[8:12], bytes(4))
+
+    def test_png_is_well_formed(self):
+        data = png_bytes(2, 1, bytes([255, 0, 0, 255, 0, 255, 0, 128]))
+        self.assertTrue(data.startswith(bytes.fromhex("89504e470d0a1a0a")))
+        self.assertEqual(data[12:16], b"IHDR")
+        self.assertEqual(data[-8:-4], b"IEND")
+
+    def test_demo_backend_has_icons_but_no_thumbnails(self):
+        self.assertEqual(len(fakewin.window_icon(1010, 20)), 20 * 20 * 4)
+        self.assertIsNone(fakewin.window_icon(4242, 20))
+        with self.assertRaises(OSError):
+            fakewin.Thumbnail(1, 1010)
 
 
 if __name__ == "__main__":

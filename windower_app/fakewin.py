@@ -4,6 +4,9 @@ on machines that are not Windows. Same functions as win32.py.
 """
 from __future__ import annotations
 
+import zlib
+
+from .icons import disc_icon
 from .model import Monitor, Placement, Rect, WindowInfo
 
 NAME = "demo"
@@ -173,6 +176,26 @@ class EventSource:
 
 def launch(exe_path: str) -> bool:
     return False
+
+
+HAS_THUMBNAILS = False
+
+
+class Thumbnail:
+    """There is no compositor to copy simulated windows from."""
+
+    def __init__(self, dest: int, src: int):
+        raise OSError("live thumbnails need the real Windows backend")
+
+
+_ICON_COLORS = [(79, 140, 255), (52, 195, 143), (241, 180, 76), (244, 106, 106), (166, 110, 250), (80, 200, 230)]
+
+
+def window_icon(hwnd: int, size: int) -> bytes | None:
+    if hwnd not in _windows:
+        return None
+    exe = _windows[hwnd]["info"].exe
+    return disc_icon(size, _ICON_COLORS[zlib.crc32(exe.encode()) % len(_ICON_COLORS)])
 
 
 # test helpers ---------------------------------------------------------------

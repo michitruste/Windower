@@ -18,7 +18,8 @@ from .model import (Layout, Monitor, Placement, Rect, Slot, WindowInfo, Zone, di
                     edge_group, fit_on_screen, match_window, move_edges, node_edges, nodes)
 from .presets import PRESETS
 from .storage import Store
-from .ui_common import (ACCENT, BG, CANVAS_BG, FG, MUTED, PANEL, SELECT, Overlay,
+from .thumbs import LiveThumbnails
+from .ui_common import (ACCENT, BG, CANVAS_BG, FG, MUTED, PANEL, SELECT, IconCache, Overlay,
                         blend, zone_color)
 
 TICK_MS = 1000          # keep-in-place / title refresh period
@@ -56,6 +57,9 @@ class WindowerApp:
         self.events = self.be.EventSource()
         self.snap_overlay = SnapOverlay(root, backend)
         self.handles = DesktopHandles(root, backend, self._handle_drag)
+        self.thumbs = LiveThumbnails(root, backend)
+        self.icons = IconCache(root, backend, size=round(16 * self.scale))
+        self._minimized: tuple = ()            # which zones' windows were minimized at the last tick
 
         self.monitor_var = tk.StringVar()
         self.gap_var = tk.IntVar(value=int(s.get("gap", 0)))
@@ -65,6 +69,7 @@ class WindowerApp:
         self.linked_var = tk.BooleanVar(value=bool(s.get("linked_edges", True)))
         self.shiftsnap_var = tk.BooleanVar(value=bool(s.get("shift_snap", True)))
         self.handles_var = tk.BooleanVar(value=bool(s.get("desktop_handles", False)))
+        self.thumbs_var = tk.BooleanVar(value=bool(s.get("live_previews", True)))
         self.hotkey_var = tk.StringVar(value=s.get("hotkey_modifier", "Ctrl+Alt"))
         self.filter_var = tk.StringVar()
         self.layout_var = tk.StringVar()
@@ -119,6 +124,10 @@ class WindowerApp:
                      rowheight=int(26 * self.scale), borderwidth=0)
         st.map("Treeview", background=[("selected", ACCENT)], foreground=[("selected", "white")])
         st.configure("Treeview.Heading", background="#2f3139", foreground=MUTED, relief="flat")
+        # flat list: no expand/collapse indicator, so the app icon sits at the left edge
+        st.layout("Treeview.Item", [("Treeitem.padding", {"sticky": "nswe", "children": [
+            ("Treeitem.image", {"side": "left", "sticky": ""}),
+            ("Treeitem.text", {"sticky": "nswe"})]})])
         st.configure("TLabelframe", background=BG, bordercolor="#3a3c45")
         st.configure("TLabelframe.Label", background=BG, foreground=MUTED)
 
@@ -144,13 +153,16 @@ class WindowerApp:
         # ---- options row --------------------------------------------------
         opts = tk.Frame(r, bg=BG)
         opts.pack(fill="x", padx=pad, pady=(0, 6))
-        for text, var, cmd in (
+        options = [
             ("Keep windows in place", self.keep_var, self._save_settings),
             ("Linked edges", self.linked_var, self._save_settings),
             ("Shift-drag snapping", self.shiftsnap_var, self._save_settings),
             ("Resize handles on desktop", self.handles_var, self._handles_toggled),
             ("Minimize panel after Apply", self.minimize_var, self._save_settings),
-        ):
+        ]
+        if self.thumbs.supported:
+            options.append(("Live previews", self.thumbs_var, self._thumbs_toggled))
+        for text, var, cmd in options:
             ttk.Checkbutton(opts, text=text, variable=var, command=cmd).pack(side="left", padx=(0, 14))
         ttk.Button(opts, text="?", width=3, command=self.show_hotkey_help).pack(side="right")
         hk = ttk.Combobox(opts, state="readonly", width=12, textvariable=self.hotkey_var,
@@ -178,10 +190,10 @@ class WindowerApp:
 
         tf = tk.Frame(left, bg=BG)
         tf.pack(fill="both", expand=True)
-        self.tree = ttk.Treeview(tf, columns=("app", "title"), show="headings", selectmode="browse")
-        self.tree.heading("app", text="App")
+        self.tree = ttk.Treeview(tf, columns=("title",), show="tree headings", selectmode="browse")
+        self.tree.heading("#0", text="App", anchor="w")
         self.tree.heading("title", text="Title")
-        self.tree.column("app", width=int(90 * self.scale), stretch=False)
+        self.tree.column("#0", width=int(116 * self.scale), stretch=False)
         self.tree.column("title", width=int(240 * self.scale))
         sb = ttk.Scrollbar(tf, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=sb.set)
@@ -308,6 +320,7 @@ class WindowerApp:
             "minimize_panel": self.minimize_var.get(), "launch_missing": self.launch_var.get(),
             "linked_edges": self.linked_var.get(), "shift_snap": self.shiftsnap_var.get(),
             "desktop_handles": self.handles_var.get(), "hotkey_modifier": self.hotkey_var.get(),
+            "live_previews": self.thumbs_var.get(),
         })
         try:
             self.store.save()
@@ -457,10 +470,12 @@ class WindowerApp:
         self.tree.delete(*self.tree.get_children())
         flt = self.filter_var.get().lower().strip()
         used = {s.hwnd for s in self.slots if s}
+        self.icons.prune({w.hwnd for w in wins} | used)
         for w in wins:
             if flt and flt not in w.title.lower() and flt not in w.exe.lower():
                 continue
-            self.tree.insert("", "end", iid=str(w.hwnd), values=(w.app, w.title),
+            self.tree.insert("", "end", iid=str(w.hwnd), text=f" {w.app}", values=(w.title,),
+                             image=self.icons.get(w.hwnd) or self.icons.blank,
                              tags=("used",) if w.hwnd in used else ())
         for s in sel:
             if self.tree.exists(s):
@@ -549,8 +564,10 @@ class WindowerApp:
                 self._drag_label.attributes("-alpha", 0.9)
             except tk.TclError:
                 pass
+            icon = self.icons.get(w.hwnd) if w else None
             tk.Label(self._drag_label, text=f"  {w.app if w else '?'}  ", bg=ACCENT, fg="white",
-                     font=("Segoe UI", 10, "bold"), pady=3).pack()
+                     font=("Segoe UI", 10, "bold"), pady=3, padx=4,
+                     image=icon or "", compound="left").pack()
         if d["active"]:
             if self._drag_label:
                 self._drag_label.geometry(f"+{e.x_root + 14}+{e.y_root + 10}")
@@ -617,6 +634,11 @@ class WindowerApp:
         ox, oy, w, h = self._preview_geom()
         c.create_rectangle(ox - 4, oy - 4, ox + w + 4, oy + h + 4, outline="#3a3c45", width=2)
         g = self.gap() * (w / self.monitor().work.w)
+        live = self.thumbs.supported and self.thumbs_var.get()
+        head = round(26 * self.scale)       # header strip above a live preview
+        inset = round(8 * self.scale)       # keeps outlines and node grips visible around it
+        boxes: dict[int, tuple[Rect, int]] = {}
+        fallback: dict[int, tuple] = {}
         for i, z in enumerate(self.layout.zones):
             x1 = ox + z.x * w + g / 2 + 2
             y1 = oy + z.y * h + g / 2 + 2
@@ -630,15 +652,41 @@ class WindowerApp:
             c.create_rectangle(x1, y1, x2, y2, fill=fill, outline=outline, width=3 if sel or hover == i else 2,
                                dash=() if alive else (5, 3))
             cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
-            c.create_text(x1 + 12, y1 + 10, text=str(i + 1), fill=col, anchor="nw",
-                          font=("Segoe UI", 16, "bold"))
             s = self.slots[i] if i < len(self.slots) else None
             wrap = max(40, x2 - x1 - 16)
+            minimized = bool(s and alive and self.be.is_minimized(s.hwnd))
+            box = (x1 + inset, y1 + head, x2 - inset, y2 - inset)
+            if (s and alive and live and not minimized
+                    and box[2] - box[0] >= 40 and box[3] - box[1] >= 30):
+                # header: number, icon, app name; the live preview fills the rest
+                c.create_text(x1 + 10, y1 + head / 2, text=str(i + 1), fill=col, anchor="w",
+                              font=("Segoe UI", 12, "bold"))
+                tx = x1 + 30 * self.scale
+                icon = self.icons.get(s.hwnd)
+                if icon:
+                    c.create_image(tx, y1 + head / 2, image=icon, anchor="w")
+                    tx += self.icons.size + 5
+                right = x2 - 8
+                if s.topmost:
+                    c.create_text(right, y1 + head / 2, text="ON TOP", fill=col, anchor="e",
+                                  font=("Segoe UI", 9, "bold"))
+                    right -= 60 * self.scale
+                c.create_text(tx, y1 + head / 2, text=_trim(_short_app(s.exe), max(3, int((right - tx) / 8))),
+                              fill=FG, anchor="w", font=("Segoe UI", 10, "bold"))
+                boxes[s.hwnd] = (Rect(round(box[0]), round(box[1]), round(box[2] - box[0]), round(box[3] - box[1])),
+                                 140 if hover == i else 255)   # see-through while something hovers it
+                fallback[s.hwnd] = ((box[0] + box[2]) / 2, (box[1] + box[3]) / 2, s.title, wrap)
+                continue
+            c.create_text(x1 + 12, y1 + 10, text=str(i + 1), fill=col, anchor="nw",
+                          font=("Segoe UI", 16, "bold"))
             if s and alive:
+                icon = self.icons.get(s.hwnd)
+                if icon and y2 - y1 > 110:
+                    c.create_image(cx, cy - 26, image=icon, anchor="s")
                 c.create_text(cx, cy - 10, text=_short_app(s.exe), fill=FG, width=wrap,
                               font=("Segoe UI", 12, "bold"), justify="center")
-                c.create_text(cx, cy + 14, text=_trim(s.title, 70), fill=MUTED, width=wrap,
-                              font=("Segoe UI", 9), justify="center")
+                c.create_text(cx, cy + 14, text=_trim(s.title, 70) + ("\n(minimized)" if minimized else ""),
+                              fill=MUTED, width=wrap, font=("Segoe UI", 9), justify="center")
                 if s.topmost:
                     c.create_text(x2 - 8, y1 + 10, text="ON TOP", fill=col, anchor="ne",
                                   font=("Segoe UI", 9, "bold"))
@@ -648,6 +696,13 @@ class WindowerApp:
             else:
                 c.create_text(cx, cy, text="drop a window here", fill=MUTED, width=wrap,
                               justify="center", font=("Segoe UI", 9, "italic"))
+        rx, ry = c.winfo_rootx(), c.winfo_rooty()
+        shown = self.thumbs.sync({hwnd: (Rect(b.x + rx, b.y + ry, b.w, b.h), op)
+                                  for hwnd, (b, op) in boxes.items()})
+        for hwnd, (fx, fy, title, wrap) in fallback.items():
+            if hwnd not in shown:   # DWM refused this one: show its title instead
+                c.create_text(fx, fy, text=_trim(title, 70), fill=MUTED, width=wrap,
+                              font=("Segoe UI", 9), justify="center")
         # dividers (lines between zones) and nodes (where lines meet) - drag them to resize
         divs = dividers(self.layout.zones)
         active = self._grip["edges"] if self._grip else set()
@@ -1030,7 +1085,13 @@ class WindowerApp:
                     target = self._target(i)
                     if not self.be.get_rect(s.hwnd).close_to(target, 6):
                         self.be.place(s.hwnd, target)
-            if changed and not self._zone_drag and not self._tree_drag:
+            # a minimized/restored or reshaped window changes how its zone is drawn
+            minimized = tuple(i for i, s in enumerate(self.slots)
+                              if s and self._slot_alive(i) and self.be.is_minimized(s.hwnd))
+            if minimized != self._minimized or self.thumbs.resized():
+                self._minimized = minimized
+                changed = True
+            if changed and not self._zone_drag and not self._tree_drag and not self._grip:
                 self.draw_preview()
                 if self.selected_zone is not None:
                     self._select_zone(self.selected_zone)
@@ -1042,6 +1103,7 @@ class WindowerApp:
             if s and s.topmost and self.be.is_window(s.hwnd):
                 self.be.set_topmost(s.hwnd, False)
         self._save_settings()
+        self.thumbs.clear()
         self.overlay.hide()
         self.snap_overlay.hide()
         self.handles.hide()
@@ -1096,6 +1158,10 @@ class WindowerApp:
     def _handle_drag(self, edges_v: list, edges_h: list, x_root: int, y_root: int, finished: bool) -> None:
         a = self.monitor().work
         self._move_grip(edges_v, edges_h, (x_root - a.x) / a.w, (y_root - a.y) / a.h, live=not finished)
+
+    def _thumbs_toggled(self) -> None:
+        self._save_settings()
+        self.draw_preview()
 
     def _handles_toggled(self) -> None:
         self._save_settings()

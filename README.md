@@ -43,6 +43,8 @@ To try the interface with fake windows (nothing on your desktop moves), run `pyt
 | **Bring all to front** | Brings all the tiled windows back above whatever is covering them |
 | **Show zones on screen** | Flashes numbered overlays on the real monitor |
 | **Restore original positions** | Puts every window back where it was before Windower moved it |
+| **Live previews** | Each filled zone in the preview shows a live picture of its window (the same DWM thumbnails the taskbar uses, so videos keep moving and it costs nothing). Minimized windows show their title instead |
+| App icons | The *Open windows* list, the zones and the drag label show each app's icon |
 
 ### Linked edges, dividers and nodes (no gaps, ever)
 

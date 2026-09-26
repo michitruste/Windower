@@ -11,7 +11,7 @@ from windower_app.icons import png_bytes, rgba_from_black_white  # noqa: E402
 from windower_app.model import (MIN_ZONE, Layout, Monitor, Rect, Screen, Slot, WindowInfo, Zone,  # noqa: E402
                                  clamp_crop, crop_from, dividers, edge_group, fit_aspect, fit_on_screen,
                                  match_window, monitor_at, move_edges, neighbour, node_edges, nodes,
-                                 peek_rect)
+                                 peek_rect, snap_value)
 from windower_app.presets import PRESETS  # noqa: E402
 from windower_app.storage import Store  # noqa: E402
 
@@ -244,6 +244,46 @@ class MultiMonitorTests(unittest.TestCase):
         self.assertEqual(neighbour(rects, 3, "left"), 1)
         self.assertEqual(neighbour(rects, 2, "down"), 3)
         self.assertIsNone(neighbour(rects, 0, "left"))
+
+
+class ZoneEditTests(unittest.TestCase):
+    """Adding, splitting and removing zones from the preview keeps each window in its zone."""
+
+    def setUp(self):
+        self.scr = Screen(Layout("2 columns", [Zone(0, 0, 0.5, 1), Zone(0.5, 0, 0.5, 1)]))
+        self.a, self.b = Slot(hwnd=1, exe="a.exe"), Slot(hwnd=2, exe="b.exe")
+        self.scr.slots = [self.a, self.b]
+
+    def test_add_zone_goes_on_top_and_empty(self):
+        i = self.scr.add_zone(Zone(0.6, 0.6, 0.3, 0.3))
+        self.assertEqual(i, 2)
+        self.assertEqual(self.scr.slots, [self.a, self.b, None])
+        self.assertTrue(self.scr.adjusted)
+        self.assertEqual(self.scr.layout.zones[-1], Zone(0.6, 0.6, 0.3, 0.3))
+
+    def test_split_keeps_window_in_first_half(self):
+        n = self.scr.split_zone(1, vertical=False)
+        self.assertEqual(n, 2)
+        self.assertEqual(self.scr.slots, [self.a, self.b, None])
+        self.assertEqual(self.scr.layout.zones[1:], [Zone(0.5, 0, 0.5, 0.5), Zone(0.5, 0.5, 0.5, 0.5)])
+
+    def test_split_first_zone_shifts_the_rest(self):
+        self.scr.split_zone(0, vertical=True)
+        self.assertEqual(self.scr.slots, [self.a, None, self.b])
+        self.assertEqual(len(self.scr.layout.zones), 3)
+
+    def test_remove_zone_returns_its_window(self):
+        self.scr.add_zone(Zone(0.1, 0.1, 0.2, 0.2))
+        self.scr.selected = 2
+        self.assertIs(self.scr.remove_zone(0), self.a)
+        self.assertEqual(self.scr.slots, [self.b, None])
+        self.assertEqual(len(self.scr.layout.zones), 2)
+        self.assertEqual(self.scr.selected, 1)        # still the same (drawn) zone
+
+    def test_snap_value(self):
+        self.assertEqual(snap_value(0.49, [0.0, 0.5, 1.0], 0.02), 0.5)
+        self.assertEqual(snap_value(0.45, [0.0, 0.5, 1.0], 0.02), 0.45)
+        self.assertEqual(snap_value(0.3, [], 0.1), 0.3)
 
 
 class ZoomTests(unittest.TestCase):

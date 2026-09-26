@@ -218,12 +218,44 @@ class Screen:
     """What one monitor shows: its layout and which window sits in each zone."""
     layout: Layout
     slots: list = field(default_factory=list)   # Slot | None per zone
-    adjusted: bool = False                        # zones resized by dragging since the layout was picked
+    adjusted: bool = False                        # zones resized/added/removed since the layout was picked
     selected: int | None = 0                      # zone selected in the panel
 
     def __post_init__(self) -> None:
         if not self.slots:
             self.slots = [None] * len(self.layout.zones)
+
+    def add_zone(self, z: Zone) -> int:
+        """Add a zone on top of the others (it can overlap them); returns its index."""
+        self.layout.zones.append(z.clamp())
+        self.slots.append(None)
+        self.adjusted = True
+        return len(self.layout.zones) - 1
+
+    def split_zone(self, i: int, vertical: bool) -> int:
+        """Split zone i in two halves (vertical=True -> left | right). Its window keeps the
+        first half; the empty second half becomes zone i+1, which is returned."""
+        a, b = self.layout.zones[i].split(vertical)
+        self.layout.zones[i] = a
+        self.layout.zones.insert(i + 1, b)
+        self.slots.insert(i + 1, None)
+        self.adjusted = True
+        return i + 1
+
+    def remove_zone(self, i: int):
+        """Delete zone i and return the slot that was in it (the zones after it move up one)."""
+        del self.layout.zones[i]
+        s = self.slots.pop(i) if i < len(self.slots) else None
+        if self.selected is not None and self.selected >= i:
+            self.selected = max(0, self.selected - 1) if self.layout.zones else None
+        self.adjusted = True
+        return s
+
+
+def snap_value(v: float, lines: list[float], tol: float) -> float:
+    """v moved onto the nearest of `lines` if one is within tol, else v unchanged."""
+    best = min(lines, key=lambda c: abs(c - v), default=v)
+    return best if abs(best - v) <= tol else v
 
 
 def monitor_at(monitors: list[Monitor], x: int, y: int) -> int | None:

@@ -14,9 +14,9 @@ from tkinter import messagebox, simpledialog, ttk
 from . import hotkeys
 from .desktop import DesktopHandles, SnapOverlay
 from .editor import LayoutEditor
-from .model import (Layout, Monitor, Placement, Rect, Screen, Slot, WindowInfo, Zone, crop_from, dividers,
-                    edge_coord, edge_group, fit_on_screen, match_window, monitor_at, move_edges, neighbour,
-                    node_edges, nodes)
+from .model import (MIN_ZONE, Layout, Monitor, Placement, Rect, Screen, Slot, WindowInfo, Zone, crop_from,
+                    dividers, edge_coord, edge_group, fit_on_screen, match_window, monitor_at, move_edges,
+                    neighbour, node_edges, nodes, snap_value)
 from .presets import PRESETS
 from .storage import Store
 from .ui_common import (ACCENT, BG, CANVAS_BG, FG, MUTED, PANEL, SELECT, IconCache, Overlay,
@@ -54,6 +54,7 @@ class WindowerApp:
         self._pending_launch: dict | None = None
         self._movesize: dict | None = None       # a window the user is dragging/resizing on the desktop
         self._grip: dict | None = None           # divider/node being dragged in the preview
+        self._draw: dict | None = None           # new zone being drawn in the preview
 
         self.events = self.be.EventSource()
         self.snap_overlay = SnapOverlay(root, backend)
@@ -224,9 +225,9 @@ class WindowerApp:
         self.del_layout_btn = ttk.Button(lrow, text="Delete", command=self.delete_layout)
         self.del_layout_btn.pack(side="left")
         ttk.Button(lrow, text="Show zones", command=self.identify).pack(side="right")
-        self.reset_btn = ttk.Button(lrow, text="Reset sizes", command=self.reset_layout_sizes)
+        self.reset_btn = ttk.Button(lrow, text="Reset layout", command=self.reset_layout_sizes)
         self.reset_btn.pack(side="right", padx=6)
-        self.saveas_btn = ttk.Button(lrow, text="Save sizes as...", command=self.save_layout_as)
+        self.saveas_btn = ttk.Button(lrow, text="Save layout as...", command=self.save_layout_as)
         self.saveas_btn.pack(side="right")
 
         self.canvas = tk.Canvas(right, bg=CANVAS_BG, highlightthickness=0,
@@ -519,9 +520,12 @@ class WindowerApp:
         return lay
 
     def reset_layout_sizes(self) -> None:
-        """Undo divider/node/edge drags: back to the saved proportions."""
+        """Undo divider/node/edge drags and added/removed zones: back to the saved layout."""
         fresh = self._find_layout(self.layout.name)
-        if not fresh or len(fresh.zones) != len(self.layout.zones):
+        if not fresh:
+            return
+        if len(fresh.zones) != len(self.layout.zones):
+            self.set_layout(fresh)   # keeps the windows, in zone order
             return
         self.layout.zones = fresh.zones
         self.layout_adjusted = False
@@ -751,6 +755,15 @@ class WindowerApp:
         for m, scr in enumerate(self.screens):
             self._draw_screen(m, scr, hover)
         self._sync_views()
+        d = self._draw
+        if d and d.get("zone"):
+            ox, oy, w, h = self._preview_geom(d["m"])
+            z = d["zone"]
+            c.create_rectangle(ox + z.x * w, oy + z.y * h, ox + (z.x + z.w) * w, oy + (z.y + z.h) * h,
+                               outline=ACCENT, fill=blend(ACCENT, alpha=0.18), dash=(5, 3), width=2)
+            r = z.to_rect(self.monitors[d["m"]].work, self.gap())
+            c.create_text(ox + (z.x + z.w / 2) * w, oy + (z.y + z.h / 2) * h, fill=FG,
+                          text=f"new zone\n{r.w} x {r.h}", justify="center", font=("Segoe UI", 9, "bold"))
         if swap_from is not None and hover is not None and hover != swap_from:
             name = (lambda k: f"{k[0] + 1}.{k[1] + 1}") if self.multi else (lambda k: str(k[1] + 1))
             c.create_text(c.winfo_width() / 2, c.winfo_height() - 2,
@@ -871,14 +884,39 @@ class WindowerApp:
         return None
 
     def _canvas_hover(self, e) -> None:
-        if self._grip or self._zone_drag:
+        if self._grip or self._zone_drag or self._draw:
             return
         g = self._grip_at(e.x, e.y)
         cur = {"node": "fleur", "v": "sb_h_double_arrow", "h": "sb_v_double_arrow"}.get(g["kind"]) if g else ""
+        if not g and self._draws_zone(e):
+            cur = "crosshair"
         try:
             self.canvas.configure(cursor=cur)
         except tk.TclError:
             pass
+
+    def _monitor_at_canvas(self, cx: float, cy: float) -> tuple[int, float, float] | None:
+        """(monitor, fx, fy) of a canvas point that lies on a monitor's work area in the preview."""
+        for m in range(len(self.screens)):
+            ox, oy, w, h = self._preview_geom(m)
+            fx, fy = (cx - ox) / w, (cy - oy) / h
+            if 0 <= fx <= 1 and 0 <= fy <= 1:
+                return m, fx, fy
+        return None
+
+    def _draws_zone(self, e) -> bool:
+        """A press here draws a new zone: on empty monitor space, or anywhere with Ctrl held."""
+        return self._monitor_at_canvas(e.x, e.y) is not None and \
+            (bool(e.state & 0x4) or self._zone_at(e.x, e.y) is None)
+
+    def _draw_snap(self, m: int, v: float, axis: str) -> float:
+        """Snap a drawn edge to the screen edges and other zones' edges, else to a 1/12 grid."""
+        _ox, _oy, w, h = self._preview_geom(m)
+        size = w if axis == "x" else h
+        edges = [0.0, 1.0] + [e for z in self.screens[m].layout.zones
+                              for e in ((z.x, z.x + z.w) if axis == "x" else (z.y, z.y + z.h))]
+        s = snap_value(v, edges, PREVIEW_GRIP / size)
+        return s if s != v else snap_value(v, [k / 12 for k in range(13)], PREVIEW_GRIP / 2 / size)
 
     def _zone_press(self, e) -> None:
         g = self._grip_at(e.x, e.y)
@@ -887,13 +925,74 @@ class WindowerApp:
             self._grip = g
             self.draw_preview()
             return
+        if self._draws_zone(e):
+            m, fx, fy = self._monitor_at_canvas(e.x, e.y)
+            self._set_current(m)
+            self._draw = {"m": m, "fx": self._draw_snap(m, fx, "x"), "fy": self._draw_snap(m, fy, "y"),
+                          "zone": None}
+            self._select_zone(None)
+            return
         key = self._zone_at(e.x, e.y)
         if key is not None:
             self._set_current(key[0])
         self._zone_drag = {"from": key, "x": e.x, "y": e.y, "active": False} if key is not None else None
         self._select_zone(key[1] if key else None)
 
+    def _draw_motion(self, e) -> None:
+        d = self._draw
+        m = d["m"]
+        ox, oy, w, h = self._preview_geom(m)
+        x2 = self._draw_snap(m, min(max((e.x - ox) / w, 0.0), 1.0), "x")
+        y2 = self._draw_snap(m, min(max((e.y - oy) / h, 0.0), 1.0), "y")
+        d["zone"] = Zone(min(d["fx"], x2), min(d["fy"], y2), abs(x2 - d["fx"]), abs(y2 - d["fy"]))
+        self.draw_preview()
+
+    def _draw_release(self, e) -> None:
+        self._draw_motion(e)
+        d, self._draw = self._draw, None
+        z = d["zone"]
+        if z.w < MIN_ZONE or z.h < MIN_ZONE:
+            self.draw_preview()
+            if z.w > 0.01 or z.h > 0.01:
+                self.set_status("Too small for a zone - drag a bigger rectangle.", warn=True)
+            return
+        i = self.screen.add_zone(z)
+        self.selected_zone = i
+        self._zones_edited(f"Added zone {i + 1}. Drop a window on it, or double-click one in the list.")
+
+    def split_selected(self, vertical: bool) -> None:
+        i = self.selected_zone
+        if i is None:
+            return
+        n = self.screen.split_zone(i, vertical)
+        self.selected_zone = n
+        how = "left | right" if vertical else "top / bottom"
+        self._zones_edited(f"Split zone {i + 1} {how}. The new zone {n + 1} is empty - drop a window on it.")
+
+    def remove_selected_zone(self) -> None:
+        i = self.selected_zone
+        if i is None:
+            return
+        if len(self.layout.zones) <= 1:
+            self.set_status("A layout needs at least one zone.", warn=True)
+            return
+        s = self.screen.remove_zone(i)
+        if s and s.topmost and not s.crop and self.be.is_window(s.hwnd):
+            self.be.set_topmost(s.hwnd, False)
+        left = f" {_short_app(s.exe)} stays where it is." if s and not s.crop and self._window(s.hwnd) else ""
+        self._zones_edited(f"Removed zone {i + 1}.{left}")
+
+    def _zones_edited(self, status: str) -> None:
+        """Zones of the current monitor were added/split/removed in the preview."""
+        self._save_settings()
+        self._layout_changed(live=False)
+        self.refresh_windows(force=True)
+        self.set_status(status + "  'Save layout as...' keeps it, 'Reset layout' undoes it.")
+
     def _zone_motion(self, e) -> None:
+        if self._draw:
+            self._draw_motion(e)
+            return
         if self._grip:
             ox, oy, w, h = self._preview_geom()
             self._move_grip(self._grip["v"], self._grip["h"], (e.x - ox) / w, (e.y - oy) / h, live=True)
@@ -907,6 +1006,9 @@ class WindowerApp:
             self.draw_preview(hover=self._zone_at(e.x, e.y), swap_from=d["from"])
 
     def _zone_release(self, e) -> None:
+        if self._draw:
+            self._draw_release(e)
+            return
         if self._grip:
             g, self._grip = self._grip, None
             ox, oy, w, h = self._preview_geom()
@@ -969,6 +1071,12 @@ class WindowerApp:
             m.add_command(label="Show whole window (tile it)", command=self.unzoom_selected)
         m.add_separator()
         m.add_command(label="Clear zone", command=self.clear_selected)
+        m.add_separator()
+        m.add_command(label="Split zone  left | right", command=lambda: self.split_selected(True))
+        m.add_command(label="Split zone  top / bottom", command=lambda: self.split_selected(False))
+        m.add_command(label="Remove zone", command=self.remove_selected_zone,
+                      state="normal" if len(self.layout.zones) > 1 else "disabled")
+        m.add_command(label="Tip: Ctrl+drag in the preview draws a new zone", state="disabled")
         m.tk_popup(x_root, y_root)
 
     # ========================================================== actions
@@ -1596,7 +1704,7 @@ class WindowerApp:
             m, i = ms["zone"]
             self._set_current(m)
             self._sticky_resize(i, self.be.get_rect(ms["hwnd"]), live=False, start=ms["start"])
-            self.set_status("Resized - neighbouring windows followed. 'Save sizes as...' keeps these proportions.")
+            self.set_status("Resized - neighbouring windows followed. 'Save layout as...' keeps these proportions.")
         elif target is not None and target < len(self._snap_keys):
             self.put_window_in_zone(ms["hwnd"], *self._snap_keys[target])
 

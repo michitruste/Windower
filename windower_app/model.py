@@ -146,6 +146,55 @@ class Slot:
                 "class_name": self.class_name, "topmost": self.topmost}
 
 
+
+@dataclass
+class Screen:
+    """What one monitor shows: its layout and which window sits in each zone."""
+    layout: Layout
+    slots: list = field(default_factory=list)   # Slot | None per zone
+    adjusted: bool = False                        # zones resized by dragging since the layout was picked
+    selected: int | None = 0                      # zone selected in the panel
+
+    def __post_init__(self) -> None:
+        if not self.slots:
+            self.slots = [None] * len(self.layout.zones)
+
+
+def monitor_at(monitors: list[Monitor], x: int, y: int) -> int | None:
+    """Index of the monitor containing the point (x, y)."""
+    for k, m in enumerate(monitors):
+        f = m.full
+        if f.x <= x < f.x + f.w and f.y <= y < f.y + f.h:
+            return k
+    return None
+
+
+def neighbour(rects: list[Rect], i: int, direction: str) -> int | None:
+    """Index of the rect next to rects[i] in direction left/right/up/down (pixels, so
+    zones on different monitors are neighbours too), or None."""
+    a = rects[i]
+    best, best_score = None, None
+    for j, b in enumerate(rects):
+        if j == i:
+            continue
+        if direction in ("left", "right"):
+            gap = (a.x - (b.x + b.w)) if direction == "left" else (b.x - (a.x + a.w))
+            along = (b.x + b.w / 2) < (a.x + a.w / 2) if direction == "left" else (b.x + b.w / 2) > (a.x + a.w / 2)
+            overlap = min(a.y + a.h, b.y + b.h) - max(a.y, b.y)
+            perp = 0 if overlap > 0 else abs((b.y + b.h / 2) - (a.y + a.h / 2))
+        else:
+            gap = (a.y - (b.y + b.h)) if direction == "up" else (b.y - (a.y + a.h))
+            along = (b.y + b.h / 2) < (a.y + a.h / 2) if direction == "up" else (b.y + b.h / 2) > (a.y + a.h / 2)
+            overlap = min(a.x + a.w, b.x + b.w) - max(a.x, b.x)
+            perp = 0 if overlap > 0 else abs((b.x + b.w / 2) - (a.x + a.w / 2))
+        if not along:
+            continue
+        score = max(gap, 0) + 2 * perp - 0.001 * max(overlap, 0)
+        if best_score is None or score < best_score:
+            best, best_score = j, score
+    return best
+
+
 def match_window(sig: dict, windows: list[WindowInfo], taken: set[int]) -> WindowInfo | None:
     """Find the open window that best matches a saved slot signature."""
     best, best_score = None, 0

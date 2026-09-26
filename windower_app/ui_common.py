@@ -87,7 +87,18 @@ class Overlay:
 
     def show(self, layout: Layout, area: Rect, gap: int = 0, ms: int = 1800,
              labels: list[str] | None = None) -> None:
+        self.show_many([(layout, area, labels)], gap, ms)
+
+    def show_many(self, screens: list[tuple[Layout, Rect, list[str] | None]], gap: int = 0,
+                  ms: int = 1800) -> None:
+        """Several layouts at once, e.g. one per monitor: (layout, area, labels)."""
         self.hide()
+        for layout, area, labels in screens:
+            self._add(layout, area, gap, labels)
+        if ms:
+            self._after = self.root.after(ms, self.hide)
+
+    def _add(self, layout: Layout, area: Rect, gap: int, labels: list[str] | None) -> None:
         for i, z in enumerate(layout.zones):
             r = z.to_rect(area, gap)
             t = tk.Toplevel(self.root)
@@ -108,8 +119,6 @@ class Overlay:
                          font=("Segoe UI", 14)).pack(pady=(0, 30))
             t.bind("<Button-1>", lambda _e: self.hide())
             self.wins.append(t)
-        if ms:
-            self._after = self.root.after(ms, self.hide)
 
     def hide(self) -> None:
         if self._after:

@@ -27,8 +27,18 @@ The user has customised: title "Windower (michi's version)" and trimmed presets 
 ## App icons
 - **Icons**: WM_GETICON (SendMessageTimeout, 100 ms), then the class icon, then PrivateExtractIconsW on the exe. Drawn with DrawIconEx on black and on white to recover alpha for any icon type (icons.rgba_from_black_white), encoded as PNG with zlib/struct for Tk. They're cached per hwnd in ui_common.IconCache.
 
+## Zoom views (feature/zoom)
+- A **Slot with `crop`** (Rect in the window's client-area pixels) is a zoom zone. The zone shows that area of the window, live and aspect-fitted, through a DWM thumbnail in a borderless no-activate Tk window of ours (zoomview.ZoomView). The window itself is never placed into the zone.
+- `_assigned()` yields **tiled slots only**, `_zooms()` the crop slots, `_all_slots()` both. `_find(hwnd)` therefore only finds tiled windows. A window can be tiled in one zone and zoomed in any number of others. Everything that places or un-topmosts a slot's hwnd skips crop slots. A zoom zone's "Always on top" applies to the view window.
+- Views are synced (diff, updated in place, keyed by (monitor, zone)) at the end of every `draw_preview()`. They appear as soon as a crop is set. `_already_applied(m)` is true if m has a view.
+- **DWM coordinates (measured on the real machine)**: with DWM_TNP_RECTSOURCE, rcSource is relative to the **GetWindowRect** corner (invisible borders included). DwmQueryThumbnailSourceSize reports the **visible frame** size. Win32.Thumbnail.show() maps client coords to that and scales by srcsize/frame (DPI-virtualized apps).
+- **Peek**: clicking a view moves the real window (same size) so the crop is centred on the view and kept on that monitor (model.peek_rect), then focuses it. ZoomViews polls every 150 ms and puts it back and sends it to the bottom once the foreground belongs to another pid. If the window is also tiled, it's only focused.
+- **AreaPicker**: an overlay over the client area with -alpha plus -transparentcolor. The dragged rect is filled with the key colour, so it shows the window undimmed. It's a one-shot drag; Esc or right-click cancels.
+- Workspaces: signature has `crop: [x, y, w, h]`. Crop sigs match windows ignoring `taken`.
+- Chromium apps stop painting when fully occluded, which freezes their view (see the README).
+
 ## Status
-- Unit tests (15) and a headless GUI flow with the fake backend pass. The real Win32 path (hooks, hotkeys, async placement) has not yet been confirmed on the user's machine.
+- Unit tests (33) and scripted GUI flows with the fake backend pass. The real Win32 run confirmed the cropped thumbnail pixels, peek and return, and the picker hole. Hooks, hotkeys and async placement are still unconfirmed on the user's machine.
 
 ## Next ideas
 A tray icon and autostart.

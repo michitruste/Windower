@@ -14,13 +14,14 @@ from tkinter import messagebox, simpledialog, ttk
 from . import hotkeys
 from .desktop import DesktopHandles, SnapOverlay
 from .editor import LayoutEditor
-from .model import (Layout, Monitor, Placement, Rect, Screen, Slot, WindowInfo, Zone, dividers, edge_coord,
-                    edge_group, fit_on_screen, match_window, monitor_at, move_edges, neighbour, node_edges,
-                    nodes)
+from .model import (Layout, Monitor, Placement, Rect, Screen, Slot, WindowInfo, Zone, crop_from, dividers,
+                    edge_coord, edge_group, fit_on_screen, match_window, monitor_at, move_edges, neighbour,
+                    node_edges, nodes)
 from .presets import PRESETS
 from .storage import Store
 from .ui_common import (ACCENT, BG, CANVAS_BG, FG, MUTED, PANEL, SELECT, IconCache, Overlay,
                         blend, zone_color)
+from .zoomview import AreaPicker, ZoomViews
 
 TICK_MS = 1000          # keep-in-place / title refresh period
 EVENT_MS = 25           # how often desktop events (drags, hotkeys) are handled
@@ -56,6 +57,9 @@ class WindowerApp:
 
         self.events = self.be.EventSource()
         self.snap_overlay = SnapOverlay(root, backend)
+        # zones that show only part of a window (slots with a crop)
+        self.views = ZoomViews(root, backend, on_menu=self._view_menu, is_tiled=lambda h: self._find(h) is not None)
+        self._area_picker: AreaPicker | None = None
         self._snap_keys: list[tuple[int, int]] = []   # (monitor, zone) of each snap overlay rect
         self._sync_screens()
         self.icons = IconCache(root, backend, size=round(16 * self.scale))
@@ -243,6 +247,7 @@ class WindowerApp:
         self.zone_label.pack(side="left", fill="x", expand=True)
         ttk.Button(zbar, text="Clear", command=self.clear_selected).pack(side="right")
         ttk.Button(zbar, text="Pick on screen", command=self.pick_on_screen).pack(side="right", padx=6)
+        ttk.Button(zbar, text="Zoom area...", command=self.zoom_area).pack(side="right")
         ttk.Checkbutton(zbar, text="Always on top", variable=self.topmost_var, style="Panel.TCheckbutton",
                         command=self._topmost_toggled).pack(side="right", padx=6)
         ttk.Button(zbar, text="Focus", command=self.focus_selected).pack(side="right")
@@ -318,7 +323,19 @@ class WindowerApp:
         return self.monitors[self.cur]
 
     def _assigned(self):
-        """(monitor, zone, slot) for every zone on every monitor that has a window."""
+        """(monitor, zone, slot) for every zone on every monitor that has a window tiled in it.
+        Zoom zones are left out: their window isn't moved into the zone (see _zooms)."""
+        for m, i, s in self._all_slots():
+            if not s.crop:
+                yield m, i, s
+
+    def _zooms(self):
+        """(monitor, zone, slot) for every zoom zone (shows part of a window)."""
+        for m, i, s in self._all_slots():
+            if s.crop:
+                yield m, i, s
+
+    def _all_slots(self):
         for m, scr in enumerate(self.screens):
             for i, s in enumerate(scr.slots):
                 if s:
@@ -389,7 +406,7 @@ class WindowerApp:
             self.screens.append(Screen(self._find_layout(name) or self._default_layout()))
         for scr in self.screens[len(self.monitors):]:
             for s in scr.slots:
-                if s and s.topmost and self.be.is_window(s.hwnd):
+                if s and s.topmost and not s.crop and self.be.is_window(s.hwnd):
                     self.be.set_topmost(s.hwnd, False)
         del self.screens[len(self.monitors):]
         for h in self.handles:
@@ -532,7 +549,8 @@ class WindowerApp:
             self.set_layout(self._default_layout())
 
     def identify(self) -> None:
-        self.overlay.show_many([(scr.layout, self.monitors[m].work, [_short_app(s.exe) if s else "" for s in scr.slots])
+        self.overlay.show_many([(scr.layout, self.monitors[m].work,
+                                 [(_short_app(s.exe) + (" (zoom)" if s.crop else "")) if s else "" for s in scr.slots])
                                 for m, scr in enumerate(self.screens)], self.gap(), ms=2000)
 
     # =========================================================== windows
@@ -613,7 +631,7 @@ class WindowerApp:
         i = self.selected_zone
         if i is not None and i < len(self.slots):
             s = self.slots[i]
-            if s and s.topmost and self.be.is_window(s.hwnd):
+            if s and s.topmost and not s.crop and self.be.is_window(s.hwnd):
                 self.be.set_topmost(s.hwnd, False)
             self.slots[i] = None
             self.draw_preview()
@@ -623,7 +641,7 @@ class WindowerApp:
     def clear_all(self) -> None:
         """Empty every zone of the current monitor."""
         for s in self.slots:
-            if s and s.topmost and self.be.is_window(s.hwnd):
+            if s and s.topmost and not s.crop and self.be.is_window(s.hwnd):
                 self.be.set_topmost(s.hwnd, False)
         self.slots = [None] * len(self.layout.zones)
         self.draw_preview()
@@ -732,6 +750,7 @@ class WindowerApp:
         c.delete("all")
         for m, scr in enumerate(self.screens):
             self._draw_screen(m, scr, hover)
+        self._sync_views()
         if swap_from is not None and hover is not None and hover != swap_from:
             name = (lambda k: f"{k[0] + 1}.{k[1] + 1}") if self.multi else (lambda k: str(k[1] + 1))
             c.create_text(c.winfo_width() / 2, c.winfo_height() - 2,
@@ -771,8 +790,9 @@ class WindowerApp:
                               font=("Segoe UI", 12, "bold"), justify="center")
                 c.create_text(cx, cy + 6, text=_trim(s.title, 70), fill=MUTED, width=wrap, anchor="n",
                               font=("Segoe UI", 9), justify="center")   # long titles wrap downwards
-                if s.topmost:
-                    c.create_text(x2 - 8, y1 + 10, text="ON TOP", fill=col, anchor="ne",
+                badges = ([f"ZOOM {s.crop.w}x{s.crop.h}"] if s.crop else []) + (["ON TOP"] if s.topmost else [])
+                for k, badge in enumerate(badges):
+                    c.create_text(x2 - 8, y1 + 10 + 16 * k, text=badge, fill=col, anchor="ne",
                                   font=("Segoe UI", 9, "bold"))
             elif s:
                 c.create_text(cx, cy, text=f"{_short_app(s.exe)}\n(closed)", fill=MUTED, width=wrap,
@@ -807,6 +827,11 @@ class WindowerApp:
                                     fill=ACCENT if current else "#3a3c45")
             c.tag_lower(bg, t)
 
+    def _sync_views(self) -> None:
+        """One zoom view on the desktop per zoom zone whose window is open (updated in place)."""
+        self.views.sync({(m, i): (s, self._target(i, m), self.monitors[m].work)
+                         for m, i, s in self._zooms() if self.be.is_window(s.hwnd)})
+
     def _select_zone(self, i: int | None) -> None:
         self.selected_zone = i if (i is not None and i < len(self.layout.zones)) else None
         where = f"Monitor {self.cur + 1}, zone" if self.multi else "Zone"
@@ -818,6 +843,8 @@ class WindowerApp:
             s = self.slots[self.selected_zone]
             r = self._target(self.selected_zone)
             what = f"{_short_app(s.exe)} - {_trim(s.title, 40)}" if s else "empty"
+            if s and s.crop:
+                what = f"zoom of {what} ({s.crop.w}x{s.crop.h} area)"
             self.zone_label.configure(text=f"{where} {self.selected_zone + 1} ({r.w}x{r.h}): {what}")
             self.topmost_var.set(bool(s and s.topmost))
         self.draw_preview()
@@ -905,8 +932,9 @@ class WindowerApp:
             self.draw_preview()
 
     def _already_applied(self, m: int | None = None) -> bool:
-        slots = self.slots if m is None else self.screens[m].slots
-        return any(s and s.hwnd in self.original for s in slots)
+        m = self.cur if m is None else m
+        tiled = any(s and not s.crop and s.hwnd in self.original for s in self.screens[m].slots)
+        return tiled or self.views.on_monitor(m)
 
     def _zone_double(self, e) -> None:
         key = self._zone_at(e.x, e.y)
@@ -917,21 +945,31 @@ class WindowerApp:
 
     def _zone_menu(self, e) -> None:
         key = self._zone_at(e.x, e.y)
-        if key is None:
-            return
-        self._set_current(key[0])
-        i = key[1]
+        if key is not None:
+            self._show_zone_menu(*key, e.x_root, e.y_root)
+
+    def _view_menu(self, key: tuple[int, int], x_root: int, y_root: int) -> None:
+        """Right-click on a zoom view on the desktop."""
+        self._show_zone_menu(*key, x_root, y_root)
+
+    def _show_zone_menu(self, zm: int, i: int, x_root: int, y_root: int) -> None:
+        self._set_current(zm)
         self._select_zone(i)
         m = tk.Menu(self.root, tearoff=False, bg=PANEL, fg=FG, activebackground=ACCENT)
         alive = self._slot_alive(i)
-        m.add_command(label="Focus window", command=self.focus_selected,
+        zoom = bool(alive and self.slots[i].crop)
+        m.add_command(label="Use window (peek)" if zoom else "Focus window", command=self.focus_selected,
                       state="normal" if alive else "disabled")
         m.add_checkbutton(label="Always on top", variable=self.topmost_var, command=self._topmost_toggled,
                           state="normal" if alive else "disabled")
         m.add_command(label="Pick window on screen...", command=self.pick_on_screen)
+        m.add_command(label="Change zoom area..." if zoom else "Zoom into an area of a window...",
+                      command=self.zoom_area)
+        if zoom:
+            m.add_command(label="Show whole window (tile it)", command=self.unzoom_selected)
         m.add_separator()
         m.add_command(label="Clear zone", command=self.clear_selected)
-        m.tk_popup(e.x_root, e.y_root)
+        m.tk_popup(x_root, y_root)
 
     # ========================================================== actions
     def apply(self, quiet: bool = False, only: set[int] | None = None) -> None:
@@ -952,6 +990,19 @@ class WindowerApp:
                 used.add(m)
             else:
                 failed.append(_short_app(s.exe))
+        # zoom zones: their window stays where it is, it only must not be minimized (DWM can't show it)
+        zooms = 0
+        for m, _i, s in self._zooms():
+            if only is not None and m not in only:
+                continue
+            if not self.be.is_window(s.hwnd):
+                missing += 1
+                continue
+            if self.be.is_minimized(s.hwnd):
+                self.be.unminimize(s.hwnd)
+                self.be.send_to_back(s.hwnd)
+            zooms += 1
+            used.add(m)
         # z-order: everything tiled comes up together; topmost flags last
         for s in order:
             self.be.raise_no_focus(s.hwnd)
@@ -959,20 +1010,23 @@ class WindowerApp:
             self.be.set_topmost(s.hwnd, s.topmost)
         self._save_settings()
         self.draw_preview()
+        self.views.lift_all()
         self._refresh_handles()
         if quiet:
             return
+        what = " and ".join(p for p in (f"{moved} window(s)" if moved or not zooms else "",
+                                        f"{zooms} zoom view(s)" if zooms else "") if p)
         if len(used) > 1:
-            msg = f"Arranged {moved} window(s) on {len(used)} monitors."
+            msg = f"Arranged {what} on {len(used)} monitors."
         else:
-            msg = f"Arranged {moved} window(s) on monitor {(min(used) if used else self.cur) + 1}."
+            msg = f"Arranged {what} on monitor {(min(used) if used else self.cur) + 1}."
         if missing:
             msg += f"  {missing} assigned window(s) are closed."
         if failed:
             msg += (f"  Could not move: {', '.join(failed)} (apps running as Administrator need "
                     f"Windower to run as Administrator too).")
         self.set_status(msg, warn=bool(failed or missing))
-        if moved == 0 and not failed:
+        if moved == 0 and zooms == 0 and not failed:
             self.set_status("Nothing to arrange yet - drag windows from the list onto the zones.", warn=True)
         elif self.minimize_var.get():
             self.root.iconify()
@@ -983,12 +1037,23 @@ class WindowerApp:
             if self.be.is_window(s.hwnd):
                 self.be.raise_no_focus(s.hwnd)
                 n += 1
+        self.views.lift_all()
         self.set_status(f"Brought {n} window(s) to the front.")
 
     def focus_selected(self) -> None:
-        i = self.selected_zone
-        if i is not None and self._slot_alive(i):
-            self.be.focus(self.slots[i].hwnd)
+        if self.selected_zone is not None:
+            self._focus_zone(self.cur, self.selected_zone)
+
+    def _focus_zone(self, m: int, i: int) -> bool:
+        """Focus the window of a zone; for a zoom zone, bring the window over the view to use it."""
+        if not self._slot_alive(i, m):
+            return False
+        s = self.screens[m].slots[i]
+        if s.crop and (m, i) in self.views.views:
+            self.views.peek((m, i))
+        else:
+            self.be.focus(s.hwnd)
+        return True
 
     def _topmost_toggled(self) -> None:
         i = self.selected_zone
@@ -997,7 +1062,7 @@ class WindowerApp:
             return
         s = self.slots[i]
         s.topmost = bool(self.topmost_var.get())
-        if self.be.is_window(s.hwnd):
+        if not s.crop and self.be.is_window(s.hwnd):   # a zoom view's own window is what stays on top
             self.be.set_topmost(s.hwnd, s.topmost)
         self.draw_preview()
 
@@ -1007,6 +1072,7 @@ class WindowerApp:
             self.original[hwnd] = self.be.save_placement(hwnd)
 
     def restore_originals(self) -> None:
+        self.views.end_peek()
         n = 0
         monitors = self.be.get_monitors()
         for hwnd, p in list(self.original.items()):
@@ -1027,13 +1093,16 @@ class WindowerApp:
                         f"('Keep windows in place' was turned off.)")
 
     # --------------------------------------------------------- pick mode
-    def pick_on_screen(self) -> None:
+    def pick_on_screen(self, zoom: bool = False) -> None:
+        """Click a window on the desktop to put it in the selected zone
+        (zoom=True: then drag over the part of it the zone should show)."""
         i = self.selected_zone
         if i is None:
             self.set_status("Select a zone first.", warn=True)
             return
-        self._picking = {"m": self.cur, "zone": i, "left": 150, "start_fg": self.be.foreground()}
-        self.set_status(f"Click on the window you want in {self._zone_name(self.cur, i)}...  (15 s)")
+        self._picking = {"m": self.cur, "zone": i, "left": 150, "start_fg": self.be.foreground(), "zoom": zoom}
+        what = "to zoom into for" if zoom else "in"
+        self.set_status(f"Click on the window you want {what} {self._zone_name(self.cur, i)}...  (15 s)")
         self.root.iconify()
         self.root.after(400, self._pick_poll)
 
@@ -1049,6 +1118,9 @@ class WindowerApp:
         if fg in wins and fg != p["start_fg"]:
             self._picking = None
             self.windows = list(wins.values())
+            if p["zoom"]:
+                self._pick_area(p["m"], p["zone"], fg)
+                return
             self.root.deiconify()
             self.root.lift()
             self._set_current(p["m"])
@@ -1061,6 +1133,94 @@ class WindowerApp:
             return
         self.root.after(100, self._pick_poll)
 
+    # -------------------------------------------------------- zoom views
+    def zoom_area(self) -> None:
+        """Make the selected zone show just part of a window, zoomed to fit the zone.
+
+        The window is the zone's own one, else the one selected in the list, else
+        you click it on the desktop; then you drag over the part you want to see."""
+        i = self.selected_zone
+        if i is None:
+            self.set_status("Select a zone first.", warn=True)
+            return
+        s = self.slots[i]
+        hwnd = s.hwnd if s and self._slot_alive(i) else 0
+        if not hwnd:
+            sel = self.tree.selection()
+            w = self._window(int(sel[0])) if sel else None
+            hwnd = w.hwnd if w and self.be.is_window(w.hwnd) else 0
+        if hwnd:
+            self._pick_area(self.cur, i, hwnd)
+        else:
+            self.pick_on_screen(zoom=True)
+
+    def _pick_area(self, m: int, i: int, hwnd: int) -> None:
+        if self._area_picker:
+            return
+        self.views.end_peek()
+        self.be.focus(hwnd)              # the window must be visible to drag over it
+        s = self.screens[m].slots[i]
+        current = s.crop if s and s.hwnd == hwnd else None
+        self.root.iconify()
+        self.set_status("Drag over the part of the window you want to see (Esc cancels).")
+
+        def done(rect: Rect | None) -> None:
+            self._area_picker = None
+            self.root.deiconify()
+            self.root.lift()
+            if rect:
+                self._set_zoom(m, i, hwnd, rect)
+            else:
+                self.set_status("Zoom cancelled.")
+
+        def start() -> None:
+            if self.be.is_window(hwnd):
+                self._area_picker = AreaPicker(self.root, self.be, hwnd, done, current)
+            else:
+                done(None)
+
+        self.root.after(250, start)      # let the window come to the front first
+
+    def _set_zoom(self, m: int, i: int, hwnd: int, crop: Rect) -> None:
+        """Zone i of monitor m now shows `crop` (client coords) of window hwnd."""
+        wins = {w.hwnd: w for w in self.be.list_windows()}
+        if hwnd not in wins:
+            self.set_status("That window can't be zoomed (it was closed or is a system window).", warn=True)
+            return
+        self.windows = list(wins.values())
+        old = self.screens[m].slots[i]
+        if old and old.topmost and not old.crop and self.be.is_window(old.hwnd):
+            self.be.set_topmost(old.hwnd, False)      # the zoom view stays on top instead
+        slot = old if old and old.hwnd == hwnd else Slot.from_window(wins[hwnd])
+        slot.topmost = bool(old and old.topmost)
+        slot.crop = crop
+        self.screens[m].slots[i] = slot
+        self._set_current(m)
+        self._select_zone(i)             # redraws the preview, which creates/updates the zoom view
+        self.views.lift_all()
+        self.refresh_windows(force=True)
+        self._refresh_handles()
+        t = self._target(i, m)
+        factor = min(t.w / crop.w, t.h / crop.h)
+        self.set_status(f"{self._zone_name(m, i).capitalize()} shows a {crop.w}x{crop.h} area of "
+                        f"{_short_app(slot.exe)} ({factor:.1f}x). Click it to use the window; keep the "
+                        f"window open and not minimized.")
+
+    def unzoom_selected(self) -> None:
+        """Turn the selected zoom zone back into a normal zone (the whole window is tiled there)."""
+        i = self.selected_zone
+        s = self.slots[i] if i is not None else None
+        if not s or not s.crop:
+            return
+        for m, k, t in list(self._assigned()):    # a window is tiled in one zone only
+            if t.hwnd == s.hwnd:
+                self.screens[m].slots[k] = None
+        s.crop = None
+        if self._already_applied():
+            self.apply(quiet=True, only={self.cur})
+        self._select_zone(i)
+        self.refresh_windows(force=True)
+
     # ======================================================== workspaces
     def _refresh_workspaces(self) -> None:
         names = sorted(self.store.workspaces)
@@ -1069,7 +1229,7 @@ class WindowerApp:
             self.ws_var.set(names[0] if names else "")
 
     def save_workspace(self) -> None:
-        if not any(True for _ in self._assigned()):
+        if not any(True for _ in self._all_slots()):
             messagebox.showinfo("Windower", "Assign some windows to zones first.")
             return
         name = simpledialog.askstring("Save workspace", "Workspace name (e.g. 'Coding', 'Study', 'Streaming'):",
@@ -1133,7 +1293,7 @@ class WindowerApp:
                 lay.builtin = existing.builtin
             scr = self.screens[m]
             for s in scr.slots:   # windows leaving this monitor shouldn't stay on top
-                if s and s.topmost and self.be.is_window(s.hwnd):
+                if s and s.topmost and not s.crop and self.be.is_window(s.hwnd):
                     self.be.set_topmost(s.hwnd, False)
             scr.layout = lay
             scr.adjusted = bool(existing) and [
@@ -1184,12 +1344,15 @@ class WindowerApp:
                     continue
                 if self._slot_alive(i, m):
                     continue
-                w = match_window(sig, wins, taken)
+                crop = crop_from(sig.get("crop"))
+                w = match_window(sig, wins, set() if crop else taken)   # zooms may share a window
                 if w:
                     slot = Slot.from_window(w)
                     slot.topmost = bool(sig.get("topmost"))
+                    slot.crop = crop
                     slots[i] = slot
-                    taken.add(w.hwnd)
+                    if not crop:
+                        taken.add(w.hwnd)
                 else:
                     missing.append((m, i))
         return missing
@@ -1216,14 +1379,14 @@ class WindowerApp:
     def _tick(self) -> None:
         try:
             changed = False
-            for m, i, s in list(self._assigned()):
+            for m, i, s in list(self._all_slots()):
                 if not self.be.is_window(s.hwnd):
                     continue
                 title = self.be.get_title(s.hwnd)
                 if title and title != s.title:
                     s.title = title
                     changed = True
-                if (self.keep_var.get() and s.hwnd in self.original and not self._busy_dragging()
+                if (self.keep_var.get() and not s.crop and s.hwnd in self.original and not self._busy_dragging()
                         and not self.be.is_minimized(s.hwnd) and not self.be.mouse_button_down()):
                     target = self._target(i, m)
                     if not self.be.get_rect(s.hwnd).close_to(target, 6):
@@ -1240,6 +1403,7 @@ class WindowerApp:
             if s.topmost and self.be.is_window(s.hwnd):
                 self.be.set_topmost(s.hwnd, False)
         self._save_settings()
+        self.views.close_all()           # also puts a peeked window back
         self.overlay.hide()
         self.snap_overlay.hide()
         for h in self.handles:
@@ -1285,7 +1449,7 @@ class WindowerApp:
     def _place_all(self, fast: bool, skip: int | None = None, m: int | None = None) -> None:
         m = self.cur if m is None else m
         for i, s in enumerate(self.screens[m].slots):
-            if not s or s.hwnd == skip or not self.be.is_window(s.hwnd):
+            if not s or s.crop or s.hwnd == skip or not self.be.is_window(s.hwnd):
                 continue
             target = self._target(i, m)
             if fast and self.be.get_rect(s.hwnd).close_to(target, 1):
@@ -1447,7 +1611,7 @@ class WindowerApp:
             om, oi = old
             new_slot.topmost = self.screens[om].slots[oi].topmost
             self.screens[om].slots[oi] = displaced
-        elif displaced and displaced.topmost and self.be.is_window(displaced.hwnd):
+        elif displaced and displaced.topmost and not displaced.crop and self.be.is_window(displaced.hwnd):
             self.be.set_topmost(displaced.hwnd, False)
         dest[zone] = new_slot
         for h in {hwnd} | ({displaced.hwnd} if displaced and old is not None else set()):
@@ -1455,7 +1619,7 @@ class WindowerApp:
                 self._remember(h)
         for km, ki in {(m, zone), old} - {None}:
             s = self.screens[km].slots[ki]
-            if s and self.be.is_window(s.hwnd):
+            if s and not s.crop and self.be.is_window(s.hwnd):
                 self.be.place(s.hwnd, self._target(ki, km))
                 self.be.set_topmost(s.hwnd, s.topmost)
         self._set_current(m)
@@ -1518,8 +1682,7 @@ class WindowerApp:
         action, arg = hotkeys.ACTIONS[hid][:2]
         if action == "focus_zone":
             m = self._screen_here()
-            if arg < len(self.screens[m].slots) and self._slot_alive(arg, m):
-                self.be.focus(self.screens[m].slots[arg].hwnd)
+            if arg < len(self.screens[m].slots) and self._focus_zone(m, arg):
                 self._set_current(m)
                 self._select_zone(arg)
         elif action == "move_to_zone":
@@ -1534,8 +1697,8 @@ class WindowerApp:
                 # the active window isn't tiled: arrows just jump into the tiled set on this monitor
                 m = self._screen_here()
                 k = self.screens[m].selected or 0
-                if action == "focus_dir" and self._slot_alive(k, m):
-                    self.be.focus(self.screens[m].slots[k].hwnd)
+                if action == "focus_dir" and k < len(self.screens[m].slots):
+                    self._focus_zone(m, k)
                 return
             # zones of every monitor, in desktop pixels: arrows cross from one monitor to the next
             keys = [(m, i) for m, scr in enumerate(self.screens) for i in range(len(scr.layout.zones))]
@@ -1544,8 +1707,7 @@ class WindowerApp:
                 return
             (cm, ci), (jm, ji) = cur, keys[j]
             if action == "focus_dir":
-                if self._slot_alive(ji, jm):
-                    self.be.focus(self.screens[jm].slots[ji].hwnd)
+                if self._focus_zone(jm, ji):
                     self._set_current(jm)
                     self._select_zone(ji)
             else:
@@ -1553,7 +1715,7 @@ class WindowerApp:
                 a[ci], b[ji] = b[ji], a[ci]
                 for km, ki in (cur, keys[j]):
                     s = self.screens[km].slots[ki]
-                    if s and self.be.is_window(s.hwnd):
+                    if s and not s.crop and self.be.is_window(s.hwnd):
                         self._remember(s.hwnd)
                         self.be.place(s.hwnd, self._target(ki, km))
                 self._set_current(jm)

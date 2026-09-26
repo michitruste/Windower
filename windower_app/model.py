@@ -52,6 +52,63 @@ def fit_on_screen(rect: Rect, monitors: list[Monitor], grip: int = 60) -> Rect:
     return Rect(a.x + (a.w - w) // 2, a.y + (a.h - h) // 2, w, h)
 
 
+def fit_aspect(box: Rect, w: int, h: int) -> Rect:
+    """Largest rect with the proportions w:h that fits inside box, centred in it."""
+    if w <= 0 or h <= 0 or box.w <= 0 or box.h <= 0:
+        return box
+    s = min(box.w / w, box.h / h)
+    fw, fh = max(1, round(w * s)), max(1, round(h * s))
+    return Rect(box.x + (box.w - fw) // 2, box.y + (box.h - fh) // 2, fw, fh)
+
+
+# ==========================================================================
+# Zoom views: a zone that shows only part of a window
+# ==========================================================================
+MIN_CROP = 8   # px: smallest area that can be picked
+
+
+def clamp_crop(crop: Rect, w: int, h: int) -> Rect | None:
+    """The part of crop that lies inside a w x h client area (the window may have
+    shrunk since the area was picked), or None if nothing of it is left."""
+    x1, y1 = max(crop.x, 0), max(crop.y, 0)
+    x2, y2 = min(crop.x + crop.w, w), min(crop.y + crop.h, h)
+    if x2 - x1 < 1 or y2 - y1 < 1:
+        return None
+    return Rect(x1, y1, x2 - x1, y2 - y1)
+
+
+def crop_from(data) -> Rect | None:
+    """A crop saved in a workspace ([x, y, w, h]) or None if missing/invalid."""
+    try:
+        x, y, w, h = (int(v) for v in data)
+    except (TypeError, ValueError):
+        return None
+    return Rect(x, y, w, h) if w >= MIN_CROP and h >= MIN_CROP else None
+
+
+def peek_rect(frame: Rect, client: Rect, crop: Rect, view: Rect, area: Rect) -> Rect:
+    """Where to move a window (same size) so the cropped part of it sits centred on
+    the zoom view and, if it fits, entirely inside `area` (the monitor's work area).
+
+    frame: the window's visible rect, client: its client area (screen coords),
+    crop: the part in client coords, view: the zoom view's rect.
+    """
+    sx = client.x + crop.x          # the crop's current position on screen
+    sy = client.y + crop.y
+    dx = round(view.x + view.w / 2 - (sx + crop.w / 2))
+    dy = round(view.y + view.h / 2 - (sy + crop.h / 2))
+    dx += _shift_inside(sx + dx, crop.w, area.x, area.w)
+    dy += _shift_inside(sy + dy, crop.h, area.y, area.h)
+    return Rect(frame.x + dx, frame.y + dy, frame.w, frame.h)
+
+
+def _shift_inside(pos: int, size: int, lo: int, span: int) -> int:
+    """How far to move a segment [pos, pos+size) so it lies inside [lo, lo+span)."""
+    if size > span:
+        return 0
+    return max(0, lo - pos) - max(0, pos + size - (lo + span))
+
+
 @dataclass(frozen=True)
 class WindowInfo:
     hwnd: int
@@ -128,13 +185,18 @@ class Layout:
 
 @dataclass
 class Slot:
-    """A window assigned to a zone, plus per-slot options."""
+    """A window assigned to a zone, plus per-slot options.
+
+    With a crop the zone is a *zoom view*: it shows just that part of the window
+    (live, scaled to the zone) and the window itself is not moved into the zone.
+    """
     hwnd: int = 0
     title: str = ""
     exe: str = ""
     exe_path: str = ""
     class_name: str = ""
     topmost: bool = False
+    crop: Rect | None = None      # area of the window's client area, in its pixels
 
     @staticmethod
     def from_window(w: WindowInfo) -> "Slot":
@@ -142,8 +204,12 @@ class Slot:
 
     def signature(self) -> dict:
         """What is saved in a workspace (hwnds don't survive a reboot)."""
-        return {"title": self.title, "exe": self.exe, "exe_path": self.exe_path,
-                "class_name": self.class_name, "topmost": self.topmost}
+        sig = {"title": self.title, "exe": self.exe, "exe_path": self.exe_path,
+               "class_name": self.class_name, "topmost": self.topmost}
+        if self.crop:
+            c = self.crop
+            sig["crop"] = [c.x, c.y, c.w, c.h]
+        return sig
 
 
 

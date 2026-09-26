@@ -3,7 +3,7 @@ Thin Win32 layer built only on ctypes (no pywin32 needed).
 
 Everything the app does to *real* windows goes through this module:
 listing top-level windows, listing monitors, moving/resizing, focusing,
-always-on-top, minimise/restore, window icons.
+always-on-top, minimise/restore, window icons and live DWM thumbnails.
 """
 from __future__ import annotations
 
@@ -49,6 +49,7 @@ SWP_NOOWNERZORDER = 0x0200
 SWP_ASYNCWINDOWPOS = 0x4000
 
 HWND_TOP = wintypes.HWND(0)
+HWND_BOTTOM = wintypes.HWND(1)
 HWND_TOPMOST = wintypes.HWND(-1)
 HWND_NOTOPMOST = wintypes.HWND(-2)
 
@@ -115,6 +116,8 @@ _proto(user32.GetClassNameW, ctypes.c_int, wintypes.HWND, wintypes.LPWSTR, ctype
 _proto(user32.GetWindow, wintypes.HWND, wintypes.HWND, wintypes.UINT)
 _proto(user32.GetWindowThreadProcessId, wintypes.DWORD, wintypes.HWND, ctypes.POINTER(wintypes.DWORD))
 _proto(user32.GetWindowRect, wintypes.BOOL, wintypes.HWND, ctypes.POINTER(wintypes.RECT))
+_proto(user32.GetClientRect, wintypes.BOOL, wintypes.HWND, ctypes.POINTER(wintypes.RECT))
+_proto(user32.ClientToScreen, wintypes.BOOL, wintypes.HWND, ctypes.POINTER(wintypes.POINT))
 _proto(user32.SetWindowPos, wintypes.BOOL, wintypes.HWND, wintypes.HWND,
        ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, wintypes.UINT)
 _proto(user32.ShowWindow, wintypes.BOOL, wintypes.HWND, ctypes.c_int)
@@ -384,6 +387,30 @@ def restore_placement(hwnd: int, p: Placement) -> bool:
     return bool(user32.SetWindowPlacement(hwnd, ctypes.byref(wp)))
 
 
+def client_rect(hwnd: int) -> Rect:
+    """The window's client area (no title bar or borders) in screen coordinates."""
+    r = wintypes.RECT()
+    user32.GetClientRect(hwnd, ctypes.byref(r))
+    p = wintypes.POINT(0, 0)
+    user32.ClientToScreen(hwnd, ctypes.byref(p))
+    return Rect(p.x, p.y, r.right, r.bottom)
+
+
+def get_pid(hwnd: int) -> int:
+    return _pid(hwnd) if hwnd else 0
+
+
+def unminimize(hwnd: int) -> None:
+    """Restore a minimized window without activating it."""
+    if is_window(hwnd) and user32.IsIconic(hwnd):
+        user32.ShowWindow(hwnd, SW_SHOWNOACTIVATE)
+
+
+def send_to_back(hwnd: int) -> None:
+    if is_window(hwnd):
+        user32.SetWindowPos(hwnd, HWND_BOTTOM, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE)
+
+
 def focus(hwnd: int) -> None:
     """Bring a window to the front and give it keyboard focus."""
     if not is_window(hwnd):
@@ -565,6 +592,99 @@ def window_icon(hwnd: int, size: int) -> bytes | None:
     finally:
         if owned:
             user32.DestroyIcon(hicon)
+
+
+# --------------------------------------------------------------------------
+# live thumbnails (zoom views)
+# --------------------------------------------------------------------------
+HAS_THUMBNAILS = True
+
+DWM_TNP_RECTDESTINATION = 0x01
+DWM_TNP_RECTSOURCE = 0x02
+DWM_TNP_OPACITY = 0x04
+DWM_TNP_VISIBLE = 0x08
+DWM_TNP_SOURCECLIENTAREAONLY = 0x10
+
+
+class DWM_THUMBNAIL_PROPERTIES(ctypes.Structure):
+    _fields_ = [
+        ("dwFlags", wintypes.DWORD),
+        ("rcDestination", wintypes.RECT),
+        ("rcSource", wintypes.RECT),
+        ("opacity", ctypes.c_ubyte),
+        ("fVisible", wintypes.BOOL),
+        ("fSourceClientAreaOnly", wintypes.BOOL),
+    ]
+
+
+_proto(dwmapi.DwmRegisterThumbnail, ctypes.c_long, wintypes.HWND, wintypes.HWND, ctypes.POINTER(wintypes.HANDLE))
+_proto(dwmapi.DwmUnregisterThumbnail, ctypes.c_long, wintypes.HANDLE)
+_proto(dwmapi.DwmUpdateThumbnailProperties, ctypes.c_long, wintypes.HANDLE,
+       ctypes.POINTER(DWM_THUMBNAIL_PROPERTIES))
+_proto(dwmapi.DwmQueryThumbnailSourceSize, ctypes.c_long, wintypes.HANDLE, ctypes.POINTER(wintypes.SIZE))
+
+
+class Thumbnail:
+    """A live copy of (part of) window `src`, drawn by DWM on top of our window `dest`.
+
+    Nothing is captured or copied by us: the compositor keeps it in sync (video,
+    typing, scrolling), the same way the taskbar hover previews work.
+    """
+
+    def __init__(self, dest: int, src: int):
+        self.dest = root_window(dest)
+        self.src = src
+        h = wintypes.HANDLE()
+        hr = dwmapi.DwmRegisterThumbnail(self.dest, src, ctypes.byref(h))
+        if hr != 0 or not h.value:
+            raise OSError(f"DwmRegisterThumbnail failed (0x{hr & 0xFFFFFFFF:08x})")
+        self._h = h.value
+
+    def source_size(self) -> tuple[int, int] | None:
+        """Size of the source's client area (what crops are measured in)."""
+        r = wintypes.RECT()
+        if not user32.GetClientRect(self.src, ctypes.byref(r)) or r.right <= 0 or r.bottom <= 0:
+            return None
+        return r.right, r.bottom
+
+    def show(self, dest: Rect, crop: Rect | None = None) -> None:
+        """Draw the source's client area, or just `crop` of it (client coords), into
+        dest (client coords of our window), stretched to fill it."""
+        # rcSource is measured from the window's outer corner (GetWindowRect, invisible
+        # borders included). DWM reports the source as the visible frame's size; when
+        # that differs from ours (DPI-virtualized apps) the coordinates are scaled.
+        raw, frame, cl = _raw_rect(self.src), _frame_rect(self.src), client_rect(self.src)
+        c = crop or Rect(0, 0, cl.w, cl.h)
+        size = wintypes.SIZE()
+        sx = sy = 1.0
+        if dwmapi.DwmQueryThumbnailSourceSize(self._h, ctypes.byref(size)) == 0 and frame.w > 0 and frame.h > 0:
+            sx, sy = size.cx / frame.w, size.cy / frame.h
+        ox, oy = cl.x - raw.x + c.x, cl.y - raw.y + c.y
+        props = DWM_THUMBNAIL_PROPERTIES()
+        props.dwFlags = (DWM_TNP_RECTDESTINATION | DWM_TNP_RECTSOURCE | DWM_TNP_OPACITY | DWM_TNP_VISIBLE
+                         | DWM_TNP_SOURCECLIENTAREAONLY)
+        props.rcDestination = wintypes.RECT(dest.x, dest.y, dest.x + dest.w, dest.y + dest.h)
+        props.rcSource = wintypes.RECT(round(ox * sx), round(oy * sy),
+                                       round((ox + c.w) * sx), round((oy + c.h) * sy))
+        props.opacity = 255
+        props.fVisible = True
+        props.fSourceClientAreaOnly = False
+        self._update(props)
+
+    def hide(self) -> None:
+        props = DWM_THUMBNAIL_PROPERTIES()
+        props.dwFlags = DWM_TNP_VISIBLE
+        props.fVisible = False
+        self._update(props)
+
+    def close(self) -> None:
+        if self._h:
+            dwmapi.DwmUnregisterThumbnail(self._h)
+            self._h = 0
+
+    def _update(self, props: DWM_THUMBNAIL_PROPERTIES) -> None:
+        if self._h:
+            dwmapi.DwmUpdateThumbnailProperties(self._h, ctypes.byref(props))
 
 
 # --------------------------------------------------------------------------

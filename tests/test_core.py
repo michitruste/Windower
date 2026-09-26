@@ -8,9 +8,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from windower_app import fakewin, hotkeys  # noqa: E402
 from windower_app.icons import png_bytes, rgba_from_black_white  # noqa: E402
-from windower_app.model import (MIN_ZONE, Layout, Monitor, Rect, Screen, WindowInfo, Zone,  # noqa: E402
-                                 dividers, edge_group, fit_on_screen, match_window, monitor_at,
-                                 move_edges, neighbour, node_edges, nodes)
+from windower_app.model import (MIN_ZONE, Layout, Monitor, Rect, Screen, Slot, WindowInfo, Zone,  # noqa: E402
+                                 clamp_crop, crop_from, dividers, edge_group, fit_aspect, fit_on_screen,
+                                 match_window, monitor_at, move_edges, neighbour, node_edges, nodes,
+                                 peek_rect)
 from windower_app.presets import PRESETS  # noqa: E402
 from windower_app.storage import Store  # noqa: E402
 
@@ -243,6 +244,45 @@ class MultiMonitorTests(unittest.TestCase):
         self.assertEqual(neighbour(rects, 3, "left"), 1)
         self.assertEqual(neighbour(rects, 2, "down"), 3)
         self.assertIsNone(neighbour(rects, 0, "left"))
+
+
+class ZoomTests(unittest.TestCase):
+    def test_fit_aspect_centres_and_keeps_proportions(self):
+        self.assertEqual(fit_aspect(Rect(0, 0, 400, 400), 200, 100), Rect(0, 100, 400, 200))
+        self.assertEqual(fit_aspect(Rect(10, 0, 400, 100), 100, 100), Rect(160, 0, 100, 100))
+
+    def test_clamp_crop_to_a_smaller_window(self):
+        self.assertEqual(clamp_crop(Rect(50, 50, 100, 100), 800, 600), Rect(50, 50, 100, 100))
+        self.assertEqual(clamp_crop(Rect(700, 500, 200, 200), 800, 600), Rect(700, 500, 100, 100))
+        self.assertIsNone(clamp_crop(Rect(900, 50, 100, 100), 800, 600))
+
+    def test_crop_saved_in_workspace(self):
+        s = Slot(1, "YouTube", "chrome.exe", crop=Rect(10, 20, 640, 360))
+        sig = s.signature()
+        self.assertEqual(sig["crop"], [10, 20, 640, 360])
+        self.assertEqual(crop_from(sig["crop"]), Rect(10, 20, 640, 360))
+        self.assertNotIn("crop", Slot(1, "x", "a.exe").signature())      # old format unchanged
+        for bad in (None, [1, 2, 3], ["a", 1, 2, 3], [0, 0, 2, 2]):
+            self.assertIsNone(crop_from(bad), bad)
+
+    def test_peek_centres_the_area_on_the_view(self):
+        frame, client = Rect(100, 100, 800, 600), Rect(100, 130, 800, 570)
+        crop, view = Rect(200, 100, 100, 50), Rect(1000, 500, 400, 200)
+        r = peek_rect(frame, client, crop, view, Rect(0, 0, 1920, 1040))
+        self.assertEqual((r.w, r.h), (800, 600))                     # moved, not resized
+        cx = r.x + (client.x - frame.x) + crop.x + crop.w / 2
+        cy = r.y + (client.y - frame.y) + crop.y + crop.h / 2
+        self.assertEqual((cx, cy), (1200, 600))
+
+    def test_peek_keeps_the_area_on_the_monitor(self):
+        frame, client = Rect(0, 0, 800, 600), Rect(0, 30, 800, 570)
+        crop = Rect(0, 0, 300, 100)
+        view = Rect(1800, 0, 120, 60)                                # tiny view in the top-right corner
+        r = peek_rect(frame, client, crop, view, Rect(0, 0, 1920, 1040))
+        left = r.x + crop.x
+        top = r.y + 30 + crop.y
+        self.assertEqual(left + crop.w, 1920)                        # pushed back inside
+        self.assertEqual(top, 0)
 
 
 if __name__ == "__main__":

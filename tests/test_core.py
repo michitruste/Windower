@@ -9,7 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from windower_app import fakewin, hotkeys  # noqa: E402
 from windower_app.icons import png_bytes, rgba_from_black_white  # noqa: E402
 from windower_app.model import (MIN_ZONE, Layout, Monitor, Rect, WindowInfo, Zone, dividers,  # noqa: E402
-                                 edge_group, fit_aspect, fit_on_screen, match_window, move_edges,
+                                 edge_group, fit_on_screen, match_window, move_edges,
                                  node_edges, nodes)
 from windower_app.presets import PRESETS  # noqa: E402
 from windower_app.storage import Store  # noqa: E402
@@ -200,13 +200,7 @@ class RestoreTests(unittest.TestCase):
         self.assertFalse(fakewin.is_minimized(hwnd))
 
 
-class PreviewTests(unittest.TestCase):
-    def test_fit_aspect_keeps_proportions_and_centres(self):
-        box = Rect(10, 20, 400, 300)
-        self.assertEqual(fit_aspect(box, 1920, 1080), Rect(10, 57, 400, 225))   # letterboxed
-        self.assertEqual(fit_aspect(box, 500, 1000), Rect(135, 20, 150, 300))   # pillarboxed
-        self.assertEqual(fit_aspect(box, 0, 100), box)
-
+class IconTests(unittest.TestCase):
     def test_icon_alpha_recovered_from_black_and_white(self):
         # BGRA pixels: opaque red, 50% blue, fully transparent
         on_black = bytes([0, 0, 255, 0, 128, 0, 0, 0, 0, 0, 0, 0])
@@ -222,11 +216,9 @@ class PreviewTests(unittest.TestCase):
         self.assertEqual(data[12:16], b"IHDR")
         self.assertEqual(data[-8:-4], b"IEND")
 
-    def test_demo_backend_has_icons_but_no_thumbnails(self):
+    def test_demo_backend_has_icons(self):
         self.assertEqual(len(fakewin.window_icon(1010, 20)), 20 * 20 * 4)
         self.assertIsNone(fakewin.window_icon(4242, 20))
-        with self.assertRaises(OSError):
-            fakewin.Thumbnail(1, 1010)
 
 
 if __name__ == "__main__":

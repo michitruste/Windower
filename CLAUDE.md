@@ -18,8 +18,7 @@ The user has customised: title "Windower (michi's version)" and trimmed presets 
 - **Global hotkeys**: RegisterHotKey on the event thread; the modifier is selectable (Ctrl+Alt by default). The table is in hotkeys.py (ids 1-9 focus, 11-19 move, 20-27 arrows focus/swap, 30 apply, 31 panel, 32 handles, 33 zones).
 - The fake backend (fakewin.py) mirrors all of this. /tmp scripted GUI tests covered node, divider, sticky resize, pinned edges, snap and swap, hotkeys, handles and the editor.
 
-## Live previews and icons
-- **thumbs.py / win32.Thumbnail**: DwmRegisterThumbnail on the panel's top-level HWND, client area only, aspect-fitted with model.fit_aspect. DWM draws it *above* the Tk canvas, so each zone keeps a header strip (number, icon, app name) and an 8 px margin for outlines and node grips. Minimized windows (and windows DWM refuses) fall back to the text layout. `_tick` redraws when a window is minimized/restored or changes shape. Setting: `live_previews`. The fake backend has HAS_THUMBNAILS=False.
+## App icons
 - **Icons**: WM_GETICON (SendMessageTimeout, 100 ms), then the class icon, then PrivateExtractIconsW on the exe. Drawn with DrawIconEx on black and on white to recover alpha for any icon type (icons.rgba_from_black_white), encoded as PNG with zlib/struct for Tk. They're cached per hwnd in ui_common.IconCache.
 
 ## Status

@@ -3,7 +3,7 @@ Thin Win32 layer built only on ctypes (no pywin32 needed).
 
 Everything the app does to *real* windows goes through this module:
 listing top-level windows, listing monitors, moving/resizing, focusing,
-always-on-top, minimise/restore, live DWM thumbnails and window icons.
+always-on-top, minimise/restore, window icons.
 """
 from __future__ import annotations
 
@@ -456,15 +456,8 @@ def launch(exe_path: str) -> bool:
 
 
 # --------------------------------------------------------------------------
-# live thumbnails (DWM) and window icons
+# window icons
 # --------------------------------------------------------------------------
-HAS_THUMBNAILS = True
-
-DWM_TNP_RECTDESTINATION = 0x01
-DWM_TNP_OPACITY = 0x04
-DWM_TNP_VISIBLE = 0x08
-DWM_TNP_SOURCECLIENTAREAONLY = 0x10
-
 WM_GETICON = 0x007F
 ICON_SMALL, ICON_BIG, ICON_SMALL2 = 0, 1, 2
 GCLP_HICON, GCLP_HICONSM = -14, -34
@@ -472,17 +465,6 @@ SMTO_ABORTIFHUNG = 0x0002
 DI_NORMAL = 0x0003
 
 gdi32 = ctypes.WinDLL("gdi32")
-
-
-class DWM_THUMBNAIL_PROPERTIES(ctypes.Structure):
-    _fields_ = [
-        ("dwFlags", wintypes.DWORD),
-        ("rcDestination", wintypes.RECT),
-        ("rcSource", wintypes.RECT),
-        ("opacity", ctypes.c_ubyte),
-        ("fVisible", wintypes.BOOL),
-        ("fSourceClientAreaOnly", wintypes.BOOL),
-    ]
 
 
 class BITMAPINFOHEADER(ctypes.Structure):
@@ -501,12 +483,6 @@ class BITMAPINFOHEADER(ctypes.Structure):
     ]
 
 
-_proto(dwmapi.DwmRegisterThumbnail, ctypes.c_long, wintypes.HWND, wintypes.HWND, ctypes.POINTER(wintypes.HANDLE))
-_proto(dwmapi.DwmUnregisterThumbnail, ctypes.c_long, wintypes.HANDLE)
-_proto(dwmapi.DwmUpdateThumbnailProperties, ctypes.c_long, wintypes.HANDLE,
-       ctypes.POINTER(DWM_THUMBNAIL_PROPERTIES))
-_proto(user32.GetClientRect, wintypes.BOOL, wintypes.HWND, ctypes.POINTER(wintypes.RECT))
-_proto(user32.ScreenToClient, wintypes.BOOL, wintypes.HWND, ctypes.POINTER(wintypes.POINT))
 _proto(user32.SendMessageTimeoutW, wintypes.LPARAM, wintypes.HWND, wintypes.UINT, wintypes.WPARAM,
        wintypes.LPARAM, wintypes.UINT, wintypes.UINT, ctypes.POINTER(ctypes.c_size_t))
 _proto(user32.DrawIconEx, wintypes.BOOL, wintypes.HDC, ctypes.c_int, ctypes.c_int, wintypes.HICON,
@@ -526,58 +502,6 @@ if ctypes.sizeof(ctypes.c_void_p) == 8:
     _GetClassLong = _proto(user32.GetClassLongPtrW, ctypes.c_size_t, wintypes.HWND, ctypes.c_int)
 else:  # pragma: no cover - 32-bit Python
     _GetClassLong = _proto(user32.GetClassLongW, wintypes.DWORD, wintypes.HWND, ctypes.c_int)
-
-
-class Thumbnail:
-    """A live copy of window `src` that DWM draws on top of our window `dest`.
-
-    Nothing is captured or copied by us: the compositor keeps it in sync (video,
-    typing, scrolling) the same way the taskbar hover previews work.
-    """
-
-    def __init__(self, dest: int, src: int):
-        self.dest = root_window(dest)
-        self.src = src
-        h = wintypes.HANDLE()
-        hr = dwmapi.DwmRegisterThumbnail(self.dest, src, ctypes.byref(h))
-        if hr != 0 or not h.value:
-            raise OSError(f"DwmRegisterThumbnail failed (0x{hr & 0xFFFFFFFF:08x})")
-        self._h = h.value
-
-    def source_size(self) -> tuple[int, int] | None:
-        """Size of the source's client area (the part the thumbnail shows)."""
-        r = wintypes.RECT()
-        if not user32.GetClientRect(self.src, ctypes.byref(r)) or r.right <= 0 or r.bottom <= 0:
-            return None
-        return r.right, r.bottom
-
-    def show(self, rect: Rect, opacity: int = 255) -> None:
-        """Draw the thumbnail at rect (screen coordinates)."""
-        p = wintypes.POINT(rect.x, rect.y)
-        user32.ScreenToClient(self.dest, ctypes.byref(p))
-        props = DWM_THUMBNAIL_PROPERTIES()
-        props.dwFlags = (DWM_TNP_RECTDESTINATION | DWM_TNP_OPACITY | DWM_TNP_VISIBLE
-                         | DWM_TNP_SOURCECLIENTAREAONLY)
-        props.rcDestination = wintypes.RECT(p.x, p.y, p.x + rect.w, p.y + rect.h)
-        props.opacity = max(0, min(255, opacity))
-        props.fVisible = True
-        props.fSourceClientAreaOnly = True
-        self._update(props)
-
-    def hide(self) -> None:
-        props = DWM_THUMBNAIL_PROPERTIES()
-        props.dwFlags = DWM_TNP_VISIBLE
-        props.fVisible = False
-        self._update(props)
-
-    def close(self) -> None:
-        if self._h:
-            dwmapi.DwmUnregisterThumbnail(self._h)
-            self._h = 0
-
-    def _update(self, props: DWM_THUMBNAIL_PROPERTIES) -> None:
-        if self._h:
-            dwmapi.DwmUpdateThumbnailProperties(self._h, ctypes.byref(props))
 
 
 def _hicon(hwnd: int, size: int) -> tuple[int, bool]:

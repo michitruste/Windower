@@ -178,16 +178,6 @@ def launch(exe_path: str) -> bool:
     return False
 
 
-HAS_THUMBNAILS = False
-
-
-class Thumbnail:
-    """There is no compositor to copy simulated windows from."""
-
-    def __init__(self, dest: int, src: int):
-        raise OSError("live thumbnails need the real Windows backend")
-
-
 _ICON_COLORS = [(79, 140, 255), (52, 195, 143), (241, 180, 76), (244, 106, 106), (166, 110, 250), (80, 200, 230)]
 
 

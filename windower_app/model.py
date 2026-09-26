@@ -52,15 +52,6 @@ def fit_on_screen(rect: Rect, monitors: list[Monitor], grip: int = 60) -> Rect:
     return Rect(a.x + (a.w - w) // 2, a.y + (a.h - h) // 2, w, h)
 
 
-def fit_aspect(box: Rect, w: int, h: int) -> Rect:
-    """Largest rect with the proportions w:h that fits inside box, centred in it."""
-    if w <= 0 or h <= 0 or box.w <= 0 or box.h <= 0:
-        return box
-    s = min(box.w / w, box.h / h)
-    fw, fh = max(1, round(w * s)), max(1, round(h * s))
-    return Rect(box.x + (box.w - fw) // 2, box.y + (box.h - fh) // 2, fw, fh)
-
-
 @dataclass(frozen=True)
 class WindowInfo:
     hwnd: int

@@ -37,8 +37,14 @@ The user has customised: title "Windower (michi's version)" and trimmed presets 
 - Workspaces: signature has `crop: [x, y, w, h]`. Crop sigs match windows ignoring `taken`.
 - Chromium apps stop painting when fully occluded, which freezes their view (see the README).
 
+## Drawing zones in the preview (feature/draw-zones)
+- Ctrl+drag on a monitor in the preview (or a plain drag on empty monitor space) draws a zone (`app._draw`, rendered inside draw_preview). It's appended on top (can overlap). Snap: screen/zone edges within PREVIEW_GRIP px, else a 1/12 grid (model.snap_value). Smaller than MIN_ZONE is dropped.
+- Zone menu: Split left|right / top/bottom (window keeps the first half, new empty zone inserted at i+1) and Remove zone (not the last one; its window is left where it is, un-topmosted).
+- **model.Screen.add_zone / split_zone / remove_zone** keep `slots` aligned with `layout.zones` and set `adjusted`. Zones after an inserted/removed one shift index; zoom views re-key via the draw_preview diff.
+- `adjusted` now also means "zones added/removed". The buttons are **Save layout as...** / **Reset layout**; reset with a different zone count goes through set_layout (keeps windows in zone order).
+
 ## Status
-- Unit tests (33) and scripted GUI flows with the fake backend pass. The real Win32 run confirmed the cropped thumbnail pixels, peek and return, and the picker hole. Hooks, hotkeys and async placement are still unconfirmed on the user's machine.
+- Unit tests (38) and scripted GUI flows with the fake backend pass. The real Win32 run confirmed the cropped thumbnail pixels, peek and return, and the picker hole. Hooks, hotkeys and async placement are still unconfirmed on the user's machine.
 
 ## Next ideas
 A tray icon and autostart.

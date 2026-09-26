@@ -35,7 +35,8 @@ To try the interface with fake windows (nothing on your desktop moves), run `pyt
 |---|---|
 | Drag one zone onto another in the preview | Swaps the two windows (applied immediately once you've applied a layout) |
 | Double-click a zone | Focuses that window |
-| Right-click a zone | Menu with Focus, Always on top, Pick, Zoom area, Clear |
+| Right-click a zone | Menu with Focus, Always on top, Pick, Zoom area, Clear, Split, Remove |
+| Ctrl+drag in the preview | Draws a new zone (see *Add, split or remove zones* below) |
 | **Always on top** | Keeps that window above the others. Handy for a video or chat |
 | **Keep windows in place** | If a window gets moved or maximized, it goes back to its zone within about 1 second |
 | **Gap px** | Space between the windows |
@@ -108,9 +109,23 @@ Once a layout is applied, the tiled windows behave like one connected surface:
   right on your screen, between the windows. Toggle them with the checkbox or the hotkey.
 - A divider only moves the windows that actually share it. In a 2x2 grid you can move the top
   and bottom halves of the middle line separately, or grab the centre node to move both together.
-- After adjusting, **Save sizes as...** stores the new proportions as a custom layout.
-  **Reset sizes** goes back to the original proportions. Saving a *workspace* also remembers the
+- After adjusting, **Save layout as...** stores the new proportions as a custom layout.
+  **Reset layout** goes back to the original proportions. Saving a *workspace* also remembers the
   adjusted sizes.
+
+### Add, split or remove zones right in the preview
+
+You don't need the layout editor to change the zones of a layout:
+
+- **Ctrl+drag** anywhere on a monitor in the preview to **draw a new zone**. It goes on top of the
+  others, so you can draw a small zone over a big one (picture-in-picture, then turn on *Always on
+  top*). On empty space (a layout that doesn't cover the whole screen) a plain drag draws too.
+  Edges snap to the screen edges, to the other zones' edges and to a 1/12 grid.
+- Right-click a zone > **Split zone left | right** or **top / bottom**. Its window keeps the first
+  half and the new half is empty and selected, ready for a window.
+- Right-click a zone > **Remove zone**. Its window stays where it is.
+- The changes apply to the real windows right away if the layout is applied. **Save layout as...**
+  keeps them as a custom layout. **Reset layout** goes back to the layout as it was saved.
 
 ### Shift-drag snapping
 

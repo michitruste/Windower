@@ -110,6 +110,7 @@ _proto(user32.IsWindow, wintypes.BOOL, wintypes.HWND)
 _proto(user32.IsWindowVisible, wintypes.BOOL, wintypes.HWND)
 _proto(user32.IsIconic, wintypes.BOOL, wintypes.HWND)
 _proto(user32.IsZoomed, wintypes.BOOL, wintypes.HWND)
+_proto(user32.IsHungAppWindow, wintypes.BOOL, wintypes.HWND)
 _proto(user32.GetWindowTextLengthW, ctypes.c_int, wintypes.HWND)
 _proto(user32.GetWindowTextW, ctypes.c_int, wintypes.HWND, wintypes.LPWSTR, ctypes.c_int)
 _proto(user32.GetClassNameW, ctypes.c_int, wintypes.HWND, wintypes.LPWSTR, ctypes.c_int)
@@ -435,13 +436,25 @@ def focus(hwnd: int) -> None:
             user32.AttachThreadInput(cur_tid, fg_tid, False)
 
 
-def raise_no_focus(hwnd: int) -> None:
-    """Show a window above the others without stealing keyboard focus."""
-    if not is_window(hwnd):
-        return
+def raise_no_focus(hwnd: int) -> bool:
+    """Show a window above the others without stealing keyboard focus.
+
+    A plain HWND_TOP is ignored by Windows for another app's window that sits behind
+    the window in front (even while our panel is active). Making it topmost and then
+    not topmost again always works and leaves it at the top of the normal windows.
+    Windows that are already topmost just go to the top of the topmost ones.
+    False if it couldn't be raised (hung, or an app running as Administrator).
+    """
+    if not is_window(hwnd) or user32.IsHungAppWindow(hwnd):   # a hung app would freeze us
+        return False
     if user32.IsIconic(hwnd):
         user32.ShowWindow(hwnd, SW_SHOWNOACTIVATE)
-    user32.SetWindowPos(hwnd, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE)
+    flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE
+    if is_topmost(hwnd):
+        return bool(user32.SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, flags))
+    ok = bool(user32.SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, flags))
+    user32.SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0, flags)
+    return ok
 
 
 def set_topmost(hwnd: int, on: bool) -> None:

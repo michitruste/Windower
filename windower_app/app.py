@@ -1032,13 +1032,22 @@ class WindowerApp:
             self.root.iconify()
 
     def bring_all_front(self) -> None:
-        n = 0
+        n, failed = 0, []
         for _m, _i, s in self._assigned():
-            if self.be.is_window(s.hwnd):
-                self.be.raise_no_focus(s.hwnd)
+            if not self.be.is_window(s.hwnd):
+                continue
+            if self.be.raise_no_focus(s.hwnd):
                 n += 1
+            else:
+                failed.append(_short_app(s.exe))
         self.views.lift_all()
-        self.set_status(f"Brought {n} window(s) to the front.")
+        for h in self.handles:           # grips stay above the windows they resize
+            h.lift()
+        msg = f"Brought {n} window(s) to the front."
+        if failed:
+            msg += (f"  Could not raise: {', '.join(failed)} (not responding, or running as Administrator "
+                    f"while Windower isn't).")
+        self.set_status(msg, warn=bool(failed))
 
     def focus_selected(self) -> None:
         if self.selected_zone is not None:

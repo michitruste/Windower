@@ -110,10 +110,12 @@ def focus(hwnd: int) -> None:
         _fg = hwnd
 
 
-def raise_no_focus(hwnd: int) -> None:
-    if hwnd in _windows:
-        _windows[hwnd]["min"] = False
-        _front(hwnd)
+def raise_no_focus(hwnd: int) -> bool:
+    if hwnd not in _windows:
+        return False
+    _windows[hwnd]["min"] = False
+    _front(hwnd)
+    return True
 
 
 def set_topmost(hwnd: int, on: bool) -> None:

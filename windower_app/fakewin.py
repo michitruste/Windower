@@ -4,7 +4,7 @@ on machines that are not Windows. Same functions as win32.py.
 """
 from __future__ import annotations
 
-from .model import Monitor, Rect, WindowInfo
+from .model import Monitor, Placement, Rect, WindowInfo
 
 NAME = "demo"
 
@@ -76,6 +76,21 @@ def place(hwnd: int, target: Rect, fast: bool = False) -> bool:
     _windows[hwnd]["rect"] = target
     _windows[hwnd]["min"] = False
     return True
+
+
+def save_placement(hwnd: int) -> Placement:
+    w = _windows[hwnd]
+    if w["min"]:
+        return Placement(None, native=w["rect"])
+    return Placement(w["rect"])
+
+
+def restore_placement(hwnd: int, p: Placement) -> bool:
+    if hwnd not in _windows:
+        return False
+    if p.native is None:
+        return place(hwnd, p.rect) if p.rect else False
+    return place(hwnd, p.native)
 
 
 def _front(hwnd):

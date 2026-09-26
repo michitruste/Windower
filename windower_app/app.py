@@ -8,13 +8,14 @@ live and stays fully interactive (just click into it).
 from __future__ import annotations
 
 import tkinter as tk
+from dataclasses import replace
 from tkinter import messagebox, simpledialog, ttk
 
 from . import hotkeys
 from .desktop import DesktopHandles, SnapOverlay
 from .editor import LayoutEditor
-from .model import (Layout, Monitor, Rect, Slot, WindowInfo, Zone, dividers, edge_coord, edge_group,
-                    match_window, move_edges, node_edges, nodes)
+from .model import (Layout, Monitor, Placement, Rect, Slot, WindowInfo, Zone, dividers, edge_coord,
+                    edge_group, fit_on_screen, match_window, move_edges, node_edges, nodes)
 from .presets import PRESETS
 from .storage import Store
 from .ui_common import (ACCENT, BG, CANVAS_BG, FG, MUTED, PANEL, SELECT, Overlay,
@@ -41,7 +42,7 @@ class WindowerApp:
         self.layout_adjusted = False
         self.slots: list[Slot | None] = [None] * len(self.layout.zones)
         self.selected_zone: int | None = 0
-        self.original: dict[int, Rect] = {}
+        self.original: dict[int, Placement] = {}
         self.windows: list[WindowInfo] = []
         self._win_sig: tuple = ()
         self._tree_drag: dict | None = None
@@ -793,8 +794,7 @@ class WindowerApp:
                 missing += 1
                 continue
             target = self._target(i)
-            if s.hwnd not in self.original:
-                self.original[s.hwnd] = self.be.get_rect(s.hwnd)
+            self._remember(s.hwnd)
             if self.be.place(s.hwnd, target):
                 moved += 1
                 order.append(s)
@@ -846,12 +846,20 @@ class WindowerApp:
             self.be.set_topmost(s.hwnd, s.topmost)
         self.draw_preview()
 
+    def _remember(self, hwnd: int) -> None:
+        """Record where a window is before Windower moves it for the first time."""
+        if hwnd not in self.original:
+            self.original[hwnd] = self.be.save_placement(hwnd)
+
     def restore_originals(self) -> None:
         n = 0
-        for hwnd, rect in list(self.original.items()):
+        monitors = self.be.get_monitors()
+        for hwnd, p in list(self.original.items()):
             if self.be.is_window(hwnd):
                 self.be.set_topmost(hwnd, False)
-                self.be.place(hwnd, rect)
+                if p.rect is not None:  # never send a window back somewhere off-screen
+                    p = replace(p, rect=fit_on_screen(p.rect, monitors))
+                self.be.restore_placement(hwnd, p)
                 n += 1
         self.original.clear()
         self.handles.hide()
@@ -1082,8 +1090,7 @@ class WindowerApp:
             target = self._target(i)
             if fast and self.be.get_rect(s.hwnd).close_to(target, 1):
                 continue
-            if s.hwnd not in self.original:
-                self.original[s.hwnd] = self.be.get_rect(s.hwnd)
+            self._remember(s.hwnd)
             self.be.place(s.hwnd, target, fast=fast)
 
     def _handle_drag(self, edges_v: list, edges_h: list, x_root: int, y_root: int, finished: bool) -> None:
@@ -1231,8 +1238,8 @@ class WindowerApp:
             self.be.set_topmost(displaced.hwnd, False)
         self.slots[zone] = new_slot
         for h in {hwnd} | ({displaced.hwnd} if displaced and old is not None else set()):
-            if self.be.is_window(h) and h not in self.original:
-                self.original[h] = self.be.get_rect(h)
+            if self.be.is_window(h):
+                self._remember(h)
         for i in {zone, old} - {None}:
             s = self.slots[i]
             if s and self.be.is_window(s.hwnd):

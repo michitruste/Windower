@@ -325,5 +325,20 @@ class ZoomTests(unittest.TestCase):
         self.assertEqual(top, 0)
 
 
+class StoreAppTest(unittest.TestCase):
+    def test_app_id_saved_in_workspace(self):
+        sig = Slot(1, "WhatsApp", "WhatsApp.Root.exe", app_id="5319275A.WhatsAppDesktop_cv1g1gvanyjgm!App").signature()
+        self.assertEqual(sig["app_id"], "5319275A.WhatsAppDesktop_cv1g1gvanyjgm!App")
+        self.assertNotIn("app_id", Slot(1, "x", "a.exe").signature())    # desktop apps: format unchanged
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows only")
+    def test_store_app_id_from_exe_path(self):
+        from windower_app.win32 import _store_app_id
+        path = r"C:\Program Files\WindowsApps\Vendor.SomeApp_1.2.3.0_x64__abc123xyz\SomeApp.exe"
+        self.assertEqual(_store_app_id(path), "Vendor.SomeApp_abc123xyz!App")   # no manifest: default id
+        self.assertEqual(_store_app_id(r"C:\Program Files\Google\Chrome\Application\chrome.exe"), "")
+        self.assertEqual(_store_app_id(r"C:\Program Files\WindowsApps\odd\x.exe"), "")
+
+
 if __name__ == "__main__":
     unittest.main()

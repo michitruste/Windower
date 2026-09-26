@@ -197,6 +197,7 @@ class Slot:
     class_name: str = ""
     topmost: bool = False
     crop: Rect | None = None      # area of the window's client area, in its pixels
+    app_id: str = ""              # Store apps: AppUserModelID, how they're launched (their exe can't be run)
 
     @staticmethod
     def from_window(w: WindowInfo) -> "Slot":
@@ -209,6 +210,8 @@ class Slot:
         if self.crop:
             c = self.crop
             sig["crop"] = [c.x, c.y, c.w, c.h]
+        if self.app_id:
+            sig["app_id"] = self.app_id
         return sig
 
 

@@ -208,8 +208,12 @@ class EventSource:
         self.events.append(tuple(event))
 
 
-def launch(exe_path: str) -> bool:
+def launch(exe_path: str, app_id: str = "") -> bool:
     return False
+
+
+def app_id(hwnd: int) -> str:
+    return ""
 
 
 _ICON_COLORS = [(79, 140, 255), (52, 195, 143), (241, 180, 76), (244, 106, 106), (166, 110, 250), (80, 200, 230)]

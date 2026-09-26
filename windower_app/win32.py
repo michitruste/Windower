@@ -10,6 +10,8 @@ from __future__ import annotations
 import ctypes
 import os
 import subprocess
+import uuid
+import xml.etree.ElementTree as ET
 from ctypes import wintypes
 
 from .icons import rgba_from_black_white
@@ -483,9 +485,16 @@ def mouse_button_down() -> bool:
     return bool(user32.GetAsyncKeyState(VK_LBUTTON) & 0x8000)
 
 
-def launch(exe_path: str) -> bool:
+def launch(exe_path: str, app_id: str = "") -> bool:
+    """Start an app. Store apps (WhatsApp, Windows Terminal...) can't be run from their exe
+    (access denied), so they're started through their AppUserModelID instead."""
+    app_id = app_id or _store_app_id(exe_path)
+    if not app_id and os.path.basename(exe_path).lower() == "applicationframehost.exe":
+        return False     # host of old-style Store apps: running it starts nothing
     try:
-        if exe_path.lower().endswith(".exe"):
+        if app_id:
+            os.startfile("shell:AppsFolder\\" + app_id)  # type: ignore[attr-defined]
+        elif exe_path.lower().endswith(".exe"):
             subprocess.Popen([exe_path], close_fds=True,
                              creationflags=getattr(subprocess, "DETACHED_PROCESS", 0))
         else:
@@ -493,6 +502,111 @@ def launch(exe_path: str) -> bool:
         return True
     except OSError:
         return False
+
+
+# --------------------------------------------------------------------------
+# Store (packaged) apps: AppUserModelID
+# --------------------------------------------------------------------------
+APPMODEL_OK = 0
+VT_LPWSTR = 31
+
+shell32 = ctypes.WinDLL("shell32")
+ole32 = ctypes.WinDLL("ole32")
+
+
+class GUID(ctypes.Structure):
+    _fields_ = [("Data1", wintypes.DWORD), ("Data2", wintypes.WORD), ("Data3", wintypes.WORD),
+                ("Data4", ctypes.c_ubyte * 8)]
+
+
+class PROPERTYKEY(ctypes.Structure):
+    _fields_ = [("fmtid", GUID), ("pid", wintypes.DWORD)]
+
+
+class PROPVARIANT(ctypes.Structure):
+    _fields_ = [("vt", wintypes.USHORT), ("r1", wintypes.WORD), ("r2", wintypes.WORD), ("r3", wintypes.WORD),
+                ("val", ctypes.c_void_p), ("pad", ctypes.c_void_p)]
+
+
+def _guid(s: str) -> GUID:
+    return GUID.from_buffer_copy(uuid.UUID(s).bytes_le)
+
+
+IID_IPropertyStore = _guid("886D8EEB-8CF2-4446-8D02-CDBA1DBDCF99")
+PKEY_AppUserModel_ID = PROPERTYKEY(_guid("9F4C2855-9F79-4B39-A8D0-E1D42DE1D5F3"), 5)
+_com_ready = False
+
+
+def app_id(hwnd: int) -> str:
+    """AppUserModelID of a Store app's window, '' for ordinary desktop apps."""
+    pid = _pid(hwnd)
+    aid = _package_app_id(pid)
+    if not aid and os.path.basename(_exe_path(pid)).lower() == "applicationframehost.exe":
+        aid = _window_app_id(hwnd)   # old-style Store apps (Calculator...) all live in this host
+    return aid
+
+
+def _package_app_id(pid: int) -> str:
+    h = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not h:
+        return ""
+    try:
+        n = wintypes.UINT(512)
+        buf = ctypes.create_unicode_buffer(n.value)
+        if kernel32.GetApplicationUserModelId(h, ctypes.byref(n), buf) == APPMODEL_OK:
+            return buf.value
+    except AttributeError:   # before Windows 8
+        pass
+    finally:
+        kernel32.CloseHandle(h)
+    return ""
+
+
+def _window_app_id(hwnd: int) -> str:
+    global _com_ready
+    if not _com_ready:
+        ole32.CoInitializeEx(None, 2)   # apartment-threaded; harmless if COM is already set up
+        _com_ready = True
+    store = ctypes.c_void_p()
+    if shell32.SHGetPropertyStoreForWindow(wintypes.HWND(hwnd), ctypes.byref(IID_IPropertyStore),
+                                           ctypes.byref(store)) != 0 or not store:
+        return ""
+    vtbl = ctypes.cast(store, ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p))).contents
+    release = ctypes.WINFUNCTYPE(ctypes.c_ulong, ctypes.c_void_p)(vtbl[2])
+    get_value = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p, ctypes.POINTER(PROPERTYKEY),
+                                   ctypes.POINTER(PROPVARIANT))(vtbl[5])
+    pv = PROPVARIANT()
+    try:
+        if get_value(store, ctypes.byref(PKEY_AppUserModel_ID), ctypes.byref(pv)) == 0                 and pv.vt == VT_LPWSTR and pv.val:
+            return ctypes.wstring_at(pv.val)
+        return ""
+    finally:
+        ole32.PropVariantClear(ctypes.byref(pv))
+        release(store)
+
+
+def _store_app_id(exe_path: str) -> str:
+    """AppUserModelID for an exe inside WindowsApps (workspaces saved before app ids were kept).
+    Package folder = Name_Version_Arch_ResourceId_PublisherId; id = Name_PublisherId!AppId."""
+    parts = exe_path.replace("/", "\\").split("\\")
+    low = [p.lower() for p in parts]
+    if "windowsapps" not in low:
+        return ""
+    k = low.index("windowsapps") + 1
+    bits = parts[k].split("_") if k < len(parts) - 1 else []
+    if len(bits) < 5:
+        return ""
+    exe_rel = "\\".join(low[k + 1:])
+    app = "App"   # by far the most common id; used if the manifest can't be read (app updated since)
+    try:
+        root = ET.parse("\\".join(parts[:k + 1] + ["AppxManifest.xml"])).getroot()
+        for el in root.iter():
+            if el.tag.endswith("}Application") and el.get("Id") and                     (el.get("Executable") or "").replace("/", "\\").lower() == exe_rel:
+                app = el.get("Id")
+                break
+    except (OSError, ET.ParseError):
+        pass
+    return f"{bits[0]}_{bits[-1]}!{app}"
 
 
 # --------------------------------------------------------------------------

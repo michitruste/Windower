@@ -179,7 +179,9 @@ picture-in-picture setup, and turn on *Always on top* for that zone.
 **Save current as...** remembers the layout of every monitor and *which app goes in which zone*.
 Later, **Load** finds those apps again (by program and window title) and arranges them.
 With **Launch missing apps** checked, it also starts apps that aren't running and places
-their windows once they open.
+their windows once they open. Microsoft Store apps (WhatsApp, Windows Terminal...) are started
+through their app ID, since Windows doesn't let other programs run their exe directly. While it
+waits for launched apps, only the windows that just opened are moved; the others stay where they are.
 
 Your layouts, workspaces and settings are stored in `%APPDATA%\Windower\config.json`.
 

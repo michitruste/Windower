@@ -1421,6 +1421,9 @@ class WindowerApp:
         if not name:
             return
         name = name.strip()
+        for _m, _i, s in self._all_slots():   # Store apps need their app id to be launched later
+            if s.hwnd and self.be.is_window(s.hwnd):
+                s.app_id = self.be.app_id(s.hwnd) or s.app_id
         self.store.put_workspace(name, {
             # every monitor's layout and windows
             "screens": [{"monitor": m, "device": self.monitors[m].name, "layout": scr.layout.to_dict(),
@@ -1492,20 +1495,31 @@ class WindowerApp:
         self.cur = cur if cur in sigs_by_m else min(sigs_by_m)
         self._refresh_layouts()
         missing = self._match_slots(sigs_by_m)
-        launched = 0
+        launched, failed = 0, []
         if missing and self.launch_var.get():
+            started = set()
             for m, i in missing:
-                sig = sigs_by_m[m][i]
-                path = sig.get("exe_path") if sig else ""
-                if path and self.be.launch(path):
+                sig = sigs_by_m[m][i] or {}
+                path, aid = sig.get("exe_path") or "", sig.get("app_id") or ""
+                if not (path or aid):
+                    continue
+                if (path, aid) in started and crop_from(sig.get("crop")):
+                    continue   # zoom zones of an app already being started share its window
+                if self.be.launch(path, aid):
                     launched += 1
+                    started.add((path, aid))
+                else:
+                    failed.append(_short_app(sig.get("exe", "")))
         self._select_zone(self.selected_zone)
         self.refresh_windows(force=True)
         self.apply(quiet=True, only=set(sigs_by_m))
         gone = f"  {skipped} saved monitor(s) are not connected." if skipped else ""
+        if failed:
+            gone += f"  Could not start: {', '.join(failed)}."
         if launched:
-            self._pending_launch = {"sigs": sigs_by_m, "tries": 20}
-            self.set_status(f"Workspace '{name}': started {launched} app(s), waiting for their windows...{gone}")
+            self._pending_launch = {"sigs": sigs_by_m, "tries": 30}
+            self.set_status(f"Workspace '{name}': started {launched} app(s), waiting for their windows...{gone}",
+                            warn=bool(failed or skipped))
             self.root.after(1000, self._wait_for_launched)
         else:
             extra = f"  {len(missing)} app(s) not running." if missing else ""
@@ -1532,6 +1546,7 @@ class WindowerApp:
                     slot = Slot.from_window(w)
                     slot.topmost = bool(sig.get("topmost"))
                     slot.crop = crop
+                    slot.app_id = sig.get("app_id") or ""
                     slots[i] = slot
                     if not crop:
                         taken.add(w.hwnd)
@@ -1544,10 +1559,15 @@ class WindowerApp:
         if not p:
             return
         p["tries"] -= 1
+        before = {(m, i) for m, i, _s in self._all_slots() if self._slot_alive(i, m)}
         missing = self._match_slots(p["sigs"])
-        self.apply(quiet=True, only=set(p["sigs"]))
-        self._select_zone(self.selected_zone)
-        self.refresh_windows(force=True)
+        new = [(m, i, s) for m, i, s in self._all_slots() if (m, i) not in before and self._slot_alive(i, m)]
+        if new:
+            # only the windows that just opened: re-applying everything would pull every tiled
+            # window above the panel once a second while an app is still starting
+            self._place_slots(new)
+            self._select_zone(self.selected_zone)
+            self.refresh_windows(force=True)
         if not missing:
             self._pending_launch = None
             self.set_status("All workspace apps are running and arranged.")
@@ -1556,6 +1576,21 @@ class WindowerApp:
             self.set_status(f"{len(missing)} app(s) did not open a window in time.", warn=True)
         else:
             self.root.after(1000, self._wait_for_launched)
+
+    def _place_slots(self, slots: list) -> None:
+        """Put these (monitor, zone, slot)s' windows in their zones without touching the z-order."""
+        for m, i, s in slots:
+            if s.crop:
+                if self.be.is_minimized(s.hwnd):
+                    self.be.unminimize(s.hwnd)
+                    self.be.send_to_back(s.hwnd)
+                continue
+            self._remember(s.hwnd)
+            self.be.place(s.hwnd, self._target(i, m))
+            if s.topmost:
+                self.be.set_topmost(s.hwnd, True)
+        self.draw_preview()
+        self._refresh_handles()
 
     # ============================================================ timer
     def _tick(self) -> None:

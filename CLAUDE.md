@@ -47,8 +47,13 @@ The user has customised: title "Windower (michi's version)" and trimmed presets 
 - The **Gap px** spinbox is gone; zones always touch (to_rect is called without a gap). An old `gap` key is dropped from settings on save; workspaces no longer store it and ignore it on load. model.Zone.to_rect and Overlay still take an optional gap.
 - **Delete...** opens a dialog (multi-select). Custom layouts are removed from the store; built-in ones are added to `settings["hidden_layouts"]` (`app.presets()` filters them out of the dropdown and editor templates; `_find_layout` still finds them so old workspaces load). *Restore built-in layouts* clears the list. At least one layout must remain. Monitors on a deleted layout go to `_default_layout()` (2 columns, else the first visible).
 
+## Launching Store apps from workspaces
+- Store/packaged apps (WhatsApp.Root.exe in WindowsApps) can't be started from their exe (WinError 5, measured). `win32.app_id(hwnd)` = GetApplicationUserModelId of the process, or for ApplicationFrameHost windows the window's PKEY_AppUserModel_ID (property store; untested, no such window was open). Saved as `app_id` in the slot signature (only when set) and kept on Slot.
+- `launch(exe_path, app_id)` uses `shell:AppsFolder\<id>`. Without an id, `_store_app_id` works it out from a WindowsApps path (Name_PublisherId + Application Id from AppxManifest.xml, else "App"), so older workspaces work too. A bare ApplicationFrameHost.exe path returns False. Launching WhatsApp this way was confirmed on the real machine.
+- `_wait_for_launched` (30 s) no longer calls apply(): it places only the slots that just got a window (`_place_slots`, no z-order change). Before, it raised every tiled window once a second, covering the panel.
+
 ## Status
-- Unit tests (38) and scripted GUI flows with the fake backend pass. The real Win32 run confirmed the cropped thumbnail pixels, peek and return, and the picker hole. Hooks, hotkeys and async placement are still unconfirmed on the user's machine.
+- Unit tests (40) and scripted GUI flows with the fake backend pass. The real Win32 run confirmed the cropped thumbnail pixels, peek and return, and the picker hole. Hooks, hotkeys and async placement are still unconfirmed on the user's machine.
 
 ## Next ideas
 A tray icon and autostart.

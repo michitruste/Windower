@@ -39,7 +39,6 @@ To try the interface with fake windows (nothing on your desktop moves), run `pyt
 | Ctrl+drag in the preview | Draws a new zone (see *Add, split or remove zones* below) |
 | **Always on top** | Keeps that window above the others. Handy for a video or chat |
 | **Keep windows in place** | If a window gets moved or maximized, it goes back to its zone within about 1 second |
-| **Gap px** | Space between the windows |
 | **Monitor** | Which screen the panel is editing (see *Several monitors* below). Each monitor uses its own work area, so the taskbar isn't covered |
 | **Bring all to front** | Brings all the tiled windows back above whatever is covering them |
 | **Show zones on screen** | Flashes numbered overlays on the real monitor |
@@ -167,12 +166,17 @@ Press **New custom...** (or **Edit...**):
   orange node dots move every line that meets there
 - **Preview on monitor** shows the zones on the real screen
 
+**Delete...** (next to *Edit...*) lists every layout. Select one or more (Ctrl/Shift+click) and press
+*Delete selected*. Custom layouts are removed; built-in ones are only hidden and come back with
+*Restore built-in layouts*. A monitor that was using a deleted layout switches to *2 columns* (or the
+first layout left) and keeps its windows.
+
 Zones can overlap. For example, you can place a small zone on top of a big one for a
 picture-in-picture setup, and turn on *Always on top* for that zone.
 
 ### Workspaces
 
-**Save current as...** remembers the layout of every monitor, the gap and *which app goes in which zone*.
+**Save current as...** remembers the layout of every monitor and *which app goes in which zone*.
 Later, **Load** finds those apps again (by program and window title) and arranges them.
 With **Launch missing apps** checked, it also starts apps that aren't running and places
 their windows once they open.

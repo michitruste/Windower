@@ -43,6 +43,10 @@ The user has customised: title "Windower (michi's version)" and trimmed presets 
 - **model.Screen.add_zone / split_zone / remove_zone** keep `slots` aligned with `layout.zones` and set `adjusted`. Zones after an inserted/removed one shift index; zoom views re-key via the draw_preview diff.
 - `adjusted` now also means "zones added/removed". The buttons are **Save layout as...** / **Reset layout**; reset with a different zone count goes through set_layout (keeps windows in zone order).
 
+## Gap removed, deleting layouts
+- The **Gap px** spinbox is gone; zones always touch (to_rect is called without a gap). An old `gap` key is dropped from settings on save; workspaces no longer store it and ignore it on load. model.Zone.to_rect and Overlay still take an optional gap.
+- **Delete...** opens a dialog (multi-select). Custom layouts are removed from the store; built-in ones are added to `settings["hidden_layouts"]` (`app.presets()` filters them out of the dropdown and editor templates; `_find_layout` still finds them so old workspaces load). *Restore built-in layouts* clears the list. At least one layout must remain. Monitors on a deleted layout go to `_default_layout()` (2 columns, else the first visible).
+
 ## Status
 - Unit tests (38) and scripted GUI flows with the fake backend pass. The real Win32 run confirmed the cropped thumbnail pixels, peek and return, and the picker hole. Hooks, hotkeys and async placement are still unconfirmed on the user's machine.
 

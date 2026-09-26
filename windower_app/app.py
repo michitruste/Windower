@@ -66,7 +66,6 @@ class WindowerApp:
         self.icons = IconCache(root, backend, size=round(16 * self.scale))
 
         self.monitor_var = tk.StringVar()
-        self.gap_var = tk.IntVar(value=int(s.get("gap", 0)))
         self.keep_var = tk.BooleanVar(value=bool(s.get("keep_in_place", False)))
         self.minimize_var = tk.BooleanVar(value=bool(s.get("minimize_panel", False)))
         self.launch_var = tk.BooleanVar(value=bool(s.get("launch_missing", True)))
@@ -145,9 +144,6 @@ class WindowerApp:
         tk.Label(head, text="Windower (michi's version)", bg=BG, fg=FG, font=("Segoe UI", 16, "bold")).pack(side="left")
         tk.Label(head, text=f"  {'DEMO MODE - simulated windows' if self.be.NAME == 'demo' else ''}",
                  bg=BG, fg="#f1b44c").pack(side="left")
-        ttk.Spinbox(head, from_=0, to=60, increment=2, width=4, textvariable=self.gap_var,
-                    command=self._gap_changed).pack(side="right")
-        tk.Label(head, text="Gap px", bg=BG, fg=FG).pack(side="right", padx=(12, 4))
         self.monitor_cb = ttk.Combobox(head, state="readonly", width=40, textvariable=self.monitor_var)
         self.monitor_cb.pack(side="right")
         self.monitor_cb.bind("<<ComboboxSelected>>", lambda _e: self._monitor_changed())
@@ -222,8 +218,7 @@ class WindowerApp:
         self.layout_cb.bind("<<ComboboxSelected>>", lambda _e: self._layout_selected())
         ttk.Button(lrow, text="New custom...", command=self.new_layout).pack(side="left")
         ttk.Button(lrow, text="Edit...", command=self.edit_layout).pack(side="left", padx=6)
-        self.del_layout_btn = ttk.Button(lrow, text="Delete", command=self.delete_layout)
-        self.del_layout_btn.pack(side="left")
+        ttk.Button(lrow, text="Delete...", command=self.delete_layout).pack(side="left")
         ttk.Button(lrow, text="Show zones", command=self.identify).pack(side="right")
         self.reset_btn = ttk.Button(lrow, text="Reset layout", command=self.reset_layout_sizes)
         self.reset_btn.pack(side="right", padx=6)
@@ -345,14 +340,13 @@ class WindowerApp:
     def _zone_name(self, m: int, i: int) -> str:
         return f"monitor {m + 1}, zone {i + 1}" if self.multi else f"zone {i + 1}"
 
-    def gap(self) -> int:
-        try:
-            return max(0, min(200, int(self.gap_var.get())))
-        except (tk.TclError, ValueError):
-            return 0
+    def presets(self) -> list[Layout]:
+        """Built-in layouts, minus the ones the user deleted (hidden, they can be restored)."""
+        hidden = set(self.store.settings.get("hidden_layouts", []))
+        return [p for p in PRESETS if p.name not in hidden]
 
     def all_layouts(self) -> list[Layout]:
-        return PRESETS + self.store.layouts
+        return self.presets() + self.store.layouts
 
     def _find_layout(self, name: str) -> Layout | None:
         for lay in self.store.layouts:          # user layouts win over presets
@@ -373,13 +367,14 @@ class WindowerApp:
 
     def _target(self, i: int, m: int | None = None) -> Rect:
         m = self.cur if m is None else m
-        return self.screens[m].layout.zones[i].to_rect(self.monitors[m].work, self.gap())
+        return self.screens[m].layout.zones[i].to_rect(self.monitors[m].work)
 
     def _save_settings(self) -> None:
+        self.store.settings.pop("gap", None)   # the gap setting was removed
         self.store.settings.update({
             "layout": self.layout.name, "monitor": self.cur,
             "screen_layouts": [scr.layout.name for scr in self.screens],
-            "gap": self.gap(), "keep_in_place": self.keep_var.get(),
+            "keep_in_place": self.keep_var.get(),
             "minimize_panel": self.minimize_var.get(), "launch_missing": self.launch_var.get(),
             "linked_edges": self.linked_var.get(), "shift_snap": self.shiftsnap_var.get(),
             "desktop_handles": self.handles_var.get(), "hotkey_modifier": self.hotkey_var.get(),
@@ -440,17 +435,12 @@ class WindowerApp:
         self._set_current(max(0, self.monitor_cb.current()))
         self._save_settings()
 
-    def _gap_changed(self) -> None:
-        self._save_settings()
-        self.draw_preview()
-
     # =========================================================== layouts
     def _refresh_layouts(self) -> None:
         self._refresh_monitor_labels()
-        values = [p.name for p in PRESETS] + [CUSTOM_MARK + lay.name for lay in self.store.layouts]
+        values = [p.name for p in self.presets()] + [CUSTOM_MARK + lay.name for lay in self.store.layouts]
         self.layout_cb.configure(values=values)
         self.layout_var.set(CUSTOM_MARK + self.layout.name if not self.layout.builtin else self.layout.name)
-        self.del_layout_btn.state(["disabled"] if self.layout.builtin else ["!disabled"])
         adj = ["!disabled"] if self.layout_adjusted else ["disabled"]
         self.reset_btn.state(adj)
         self.saveas_btn.state(adj)
@@ -515,7 +505,12 @@ class WindowerApp:
                      {lay.name for lay in self.store.layouts}, on_save)
 
     def _default_layout(self) -> Layout:
-        lay = (next((p for p in PRESETS if p.name == "2 columns"), None) or PRESETS[0]).copy()
+        """'2 columns' if it's still there, else the first layout left in the dropdown."""
+        shown = self.presets()
+        pick = next((p for p in shown if p.name == "2 columns"), None) or (shown[0] if shown else None)
+        if pick is None and self.store.layouts:
+            return self.store.layouts[0].copy()
+        lay = (pick or next((p for p in PRESETS if p.name == "2 columns"), PRESETS[0])).copy()
         lay.builtin = True
         return lay
 
@@ -545,17 +540,90 @@ class WindowerApp:
         self._refresh_layouts()
         self._save_settings()
         self.set_status(f"Saved custom layout '{lay.name}'.")
+
     def delete_layout(self) -> None:
-        if self.layout.builtin:
-            return
-        if messagebox.askyesno("Windower", f"Delete custom layout '{self.layout.name}'?"):
-            self.store.delete_layout(self.layout.name)
-            self.set_layout(self._default_layout())
+        """Dialog to delete layouts: custom ones are removed, built-in ones are hidden (restorable)."""
+        dlg = tk.Toplevel(self.root, bg=BG, padx=12, pady=10)
+        dlg.title("Delete layouts")
+        dlg.transient(self.root)
+        dlg.resizable(False, False)
+        tk.Label(dlg, text="Select the layouts to delete (Ctrl/Shift+click for several).\n"
+                           "Built-in layouts are only hidden and can be restored.",
+                 bg=BG, fg=MUTED, justify="left").pack(anchor="w", pady=(0, 6))
+        lb = tk.Listbox(dlg, selectmode="extended", height=12, width=36, activestyle="none",
+                        bg=PANEL, fg=FG, selectbackground=ACCENT, selectforeground="white",
+                        highlightthickness=0, borderwidth=0, font=("Segoe UI", 10))
+        lb.pack(fill="both", expand=True)
+        btns = tk.Frame(dlg, bg=BG)
+        btns.pack(fill="x", pady=(8, 0))
+        restore = ttk.Button(btns, text="Restore built-in layouts")
+        items: list[Layout] = []
+
+        def fill() -> None:
+            items[:] = self.all_layouts()
+            lb.delete(0, "end")
+            for k, lay in enumerate(items):
+                lb.insert("end", lay.name if lay.builtin else CUSTOM_MARK + lay.name)
+                if lay.name == self.layout.name and lay.builtin == self.layout.builtin:
+                    lb.selection_set(k)
+                    lb.see(k)
+            restore.state(["!disabled"] if self.store.settings.get("hidden_layouts") else ["disabled"])
+
+        def delete() -> None:
+            picked = [items[k] for k in lb.curselection()]
+            if not picked:
+                return
+            if len(picked) >= len(items):
+                messagebox.showinfo("Windower", "Keep at least one layout.", parent=dlg)
+                return
+            names = ", ".join(f"'{lay.name}'" for lay in picked)
+            if messagebox.askyesno("Windower", f"Delete {names}?", parent=dlg):
+                self._delete_layouts(picked)
+                fill()
+
+        def restore_builtins() -> None:
+            self.store.settings["hidden_layouts"] = []
+            self._refresh_layouts()
+            self._save_settings()
+            self.set_status("Built-in layouts restored.")
+            fill()
+
+        restore.configure(command=restore_builtins)
+        ttk.Button(btns, text="Delete selected", command=delete).pack(side="left")
+        restore.pack(side="left", padx=6)
+        ttk.Button(btns, text="Close", command=dlg.destroy).pack(side="right")
+        lb.bind("<Delete>", lambda _e: delete())
+        dlg.bind("<Escape>", lambda _e: dlg.destroy())
+        fill()
+        dlg.grab_set()
+        lb.focus_set()
+
+    def _delete_layouts(self, picked: list[Layout]) -> None:
+        gone = {(lay.name, lay.builtin) for lay in picked}
+        hidden = list(self.store.settings.get("hidden_layouts", []))
+        for lay in picked:
+            if lay.builtin:
+                if lay.name not in hidden:
+                    hidden.append(lay.name)
+            else:
+                self.store.delete_layout(lay.name)
+        self.store.settings["hidden_layouts"] = hidden
+        # monitors showing a deleted layout switch to the default one (their windows stay assigned)
+        keep = self.cur
+        for m, scr in enumerate(self.screens):
+            if (scr.layout.name, scr.layout.builtin) in gone:
+                self.cur = m
+                self.set_layout(self._default_layout())
+        self.cur = keep
+        self._refresh_layouts()
+        self._save_settings()
+        self.draw_preview()
+        self.set_status(f"Deleted {len(picked)} layout(s).")
 
     def identify(self) -> None:
         self.overlay.show_many([(scr.layout, self.monitors[m].work,
                                  [(_short_app(s.exe) + (" (zoom)" if s.crop else "")) if s else "" for s in scr.slots])
-                                for m, scr in enumerate(self.screens)], self.gap(), ms=2000)
+                                for m, scr in enumerate(self.screens)], ms=2000)
 
     # =========================================================== windows
     def refresh_windows(self, force: bool = False) -> None:
@@ -761,7 +829,7 @@ class WindowerApp:
             z = d["zone"]
             c.create_rectangle(ox + z.x * w, oy + z.y * h, ox + (z.x + z.w) * w, oy + (z.y + z.h) * h,
                                outline=ACCENT, fill=blend(ACCENT, alpha=0.18), dash=(5, 3), width=2)
-            r = z.to_rect(self.monitors[d["m"]].work, self.gap())
+            r = z.to_rect(self.monitors[d["m"]].work)
             c.create_text(ox + (z.x + z.w / 2) * w, oy + (z.y + z.h / 2) * h, fill=FG,
                           text=f"new zone\n{r.w} x {r.h}", justify="center", font=("Segoe UI", 9, "bold"))
         if swap_from is not None and hover is not None and hover != swap_from:
@@ -776,12 +844,11 @@ class WindowerApp:
         current = m == self.cur
         c.create_rectangle(ox - 4, oy - 4, ox + w + 4, oy + h + 4, width=2,
                            outline=ACCENT if current and self.multi else "#3a3c45")
-        g = self.gap() * (w / self.monitors[m].work.w)
         for i, z in enumerate(scr.layout.zones):
-            x1 = ox + z.x * w + g / 2 + 2
-            y1 = oy + z.y * h + g / 2 + 2
-            x2 = ox + (z.x + z.w) * w - g / 2 - 2
-            y2 = oy + (z.y + z.h) * h - g / 2 - 2
+            x1 = ox + z.x * w + 2
+            y1 = oy + z.y * h + 2
+            x2 = ox + (z.x + z.w) * w - 2
+            y2 = oy + (z.y + z.h) * h - 2
             col = zone_color(i)
             sel = current and i == scr.selected
             hot = hover == (m, i)
@@ -1360,7 +1427,6 @@ class WindowerApp:
                          "slots": [s.signature() if s else None for s in scr.slots]}
                         for m, scr in enumerate(self.screens)],
             "monitor": self.cur,
-            "gap": self.gap(),
             # the current monitor in the old one-monitor format, for older Windower versions
             "layout": self.layout.to_dict(),
             "slots": [s.signature() if s else None for s in self.slots],
@@ -1396,7 +1462,6 @@ class WindowerApp:
         saved = data.get("screens") or [{"monitor": data.get("monitor", 0), "layout": data["layout"],
                                          "slots": data.get("slots", [])}]
         self._refresh_monitors(select=self.cur)   # monitors may have been plugged in/out since start
-        self.gap_var.set(int(data.get("gap", 0)))
         sigs_by_m: dict[int, list] = {}
         skipped = 0
         for sd in saved:

@@ -25,7 +25,7 @@ class Store:
     """
     config.json = {
       "layouts":    [ {name, zones:[{x,y,w,h}]} ],
-      "workspaces": { name: {layout, monitor, gap, slots:[signature|null]} },
+      "workspaces": { name: {screens, layout, monitor, slots:[signature|null]} },
       "settings":   { ... }
     }
     """

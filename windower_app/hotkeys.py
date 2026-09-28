@@ -26,7 +26,8 @@ for _k, (_vk, (_name, _)) in enumerate(DIRS.items()):
 ACTIONS[30] = ("apply", None, False, VK_RETURN)
 ACTIONS[31] = ("toggle_panel", None, False, ord("W"))
 ACTIONS[32] = ("toggle_handles", None, False, ord("H"))
-ACTIONS[33] = ("show_zones", None, False, ord("Z"))
+ACTIONS[33] = ("show_zones", None, False, ord("S"))
+ACTIONS[34] = ("zoom_window", None, False, ord("Z"))
 
 
 def build(modifier_name: str) -> list[tuple[int, int, int]]:
@@ -46,7 +47,9 @@ def help_rows(modifier_name: str) -> list[tuple[str, str]]:
         (f"{m} + Enter", "Apply / re-tile the layout"),
         (f"{m} + W", "Show / hide the Windower panel"),
         (f"{m} + H", "Show / hide the resize handles on the desktop"),
-        (f"{m} + Z", "Flash the zones on screen"),
+        (f"{m} + S", "Flash the zones on screen"),
+        (f"{m} + Z", "Zoom: drag over part of the active window to show it in its zone"
+                     " (the zone it's tiled in, else the selected zone)"),
         ("Shift while dragging a window", "Show the zones - drop the window into one to snap it"),
     ]
 

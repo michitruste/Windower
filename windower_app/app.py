@@ -59,7 +59,12 @@ class WindowerApp:
         self.events = self.be.EventSource()
         self.snap_overlay = SnapOverlay(root, backend)
         # zones that show only part of a window (slots with a crop)
-        self.views = ZoomViews(root, backend, on_menu=self._view_menu, is_tiled=lambda h: self._find(h) is not None)
+        self.views = ZoomViews(root, backend, on_menu=self._view_menu, is_tiled=lambda h: self._find(h) is not None,
+                               journal=self.store.path.with_name("hidden_windows.json"),
+                               on_clear=self._view_clear, on_crop=self._view_cropped,
+                               icon=lambda h: self.icons.get(h), scale=self.scale)
+        self._crop_after: str | None = None
+        self.views.recover()             # windows left hidden if Windower didn't close cleanly
         self._area_picker: AreaPicker | None = None
         self._snap_keys: list[tuple[int, int]] = []   # (monitor, zone) of each snap overlay rect
         self._sync_screens()
@@ -73,6 +78,8 @@ class WindowerApp:
         self.shiftsnap_var = tk.BooleanVar(value=bool(s.get("shift_snap", True)))
         self.handles_var = tk.BooleanVar(value=bool(s.get("desktop_handles", False)))
         self.hotkey_var = tk.StringVar(value=s.get("hotkey_modifier", "Ctrl+Alt"))
+        self.hidezoom_var = tk.BooleanVar(value=bool(s.get("hide_zoomed", True)))
+        self.views.hide_sources = self.hidezoom_var.get()
         self.filter_var = tk.StringVar()
         self.layout_var = tk.StringVar()
         self.ws_var = tk.StringVar()
@@ -158,6 +165,7 @@ class WindowerApp:
             ("Shift-drag snapping", self.shiftsnap_var, self._save_settings),
             ("Resize handles on desktop", self.handles_var, self._handles_toggled),
             ("Minimize panel after Apply", self.minimize_var, self._save_settings),
+            ("Hide zoomed windows", self.hidezoom_var, self._hidezoom_toggled),
         ):
             ttk.Checkbutton(opts, text=text, variable=var, command=cmd).pack(side="left", padx=(0, 14))
         ttk.Button(opts, text="?", width=3, command=self.show_hotkey_help).pack(side="right")
@@ -378,6 +386,7 @@ class WindowerApp:
             "minimize_panel": self.minimize_var.get(), "launch_missing": self.launch_var.get(),
             "linked_edges": self.linked_var.get(), "shift_snap": self.shiftsnap_var.get(),
             "desktop_handles": self.handles_var.get(), "hotkey_modifier": self.hotkey_var.get(),
+            "hide_zoomed": self.hidezoom_var.get(),
         })
         try:
             self.store.save()
@@ -910,7 +919,31 @@ class WindowerApp:
     def _sync_views(self) -> None:
         """One zoom view on the desktop per zoom zone whose window is open (updated in place)."""
         self.views.sync({(m, i): (s, self._target(i, m), self.monitors[m].work)
-                         for m, i, s in self._zooms() if self.be.is_window(s.hwnd)})
+                         for m, i, s in self._zooms() if self.be.is_window(s.hwnd)},
+                        [mon.work for mon in self.monitors])
+
+    def _view_cropped(self, key: tuple[int, int]) -> None:
+        """A zoom view was panned or zoomed: update the preview and status (once things settle)."""
+        if self._crop_after:
+            self.root.after_cancel(self._crop_after)
+
+        def done() -> None:
+            self._crop_after = None
+            self.draw_preview()
+            m, i = key
+            v = self.views.views.get(key)
+            s = self.screens[m].slots[i] if m < len(self.screens) and i < len(self.screens[m].slots) else None
+            if v and s and s.crop:
+                self.set_status(f"{self._zone_name(*key).capitalize()} shows a {s.crop.w}x{s.crop.h} area of "
+                                f"{_short_app(s.exe)} ({v.factor(s.crop):.1f}x).")
+
+        self._crop_after = self.root.after(150, done)
+
+    def _view_clear(self, key: tuple[int, int]) -> None:
+        """The close button of a zoom view: clear its zone."""
+        self._set_current(key[0])
+        self._select_zone(key[1])
+        self.clear_selected()
 
     def _select_zone(self, i: int | None) -> None:
         self.selected_zone = i if (i is not None and i < len(self.layout.zones)) else None
@@ -1136,6 +1169,8 @@ class WindowerApp:
                       command=self.zoom_area)
         if zoom:
             m.add_command(label="Show whole window (tile it)", command=self.unzoom_selected)
+            if self.views.floating((zm, i)):
+                m.add_command(label="Put the view back in its zone", command=lambda: self.views.dock(key=(zm, i)))
         m.add_separator()
         m.add_command(label="Clear zone", command=self.clear_selected)
         m.add_separator()
@@ -1184,6 +1219,7 @@ class WindowerApp:
         for s in order:
             self.be.set_topmost(s.hwnd, s.topmost)
         self._save_settings()
+        self.views.dock(only)            # moved zoom views go back into their zones
         self.draw_preview()
         self.views.lift_all()
         self._refresh_handles()
@@ -1250,6 +1286,15 @@ class WindowerApp:
             self.be.set_topmost(s.hwnd, s.topmost)
         self.draw_preview()
 
+    def _hidezoom_toggled(self) -> None:
+        self.views.hide_sources = self.hidezoom_var.get()
+        self.views.sync_hidden()
+        self._save_settings()
+        n = len(list(self._zooms()))
+        self.set_status(("Zoomed windows are hidden; click a zoom view (or Alt+Tab to the window) to use it."
+                         if self.hidezoom_var.get() else "Zoomed windows are visible again.") if n else
+                        "Applies to windows shown in zoom zones.")
+
     def _remember(self, hwnd: int) -> None:
         """Record where a window is before Windower moves it for the first time."""
         if hwnd not in self.original:
@@ -1303,7 +1348,7 @@ class WindowerApp:
             self._picking = None
             self.windows = list(wins.values())
             if p["zoom"]:
-                self._pick_area(p["m"], p["zone"], fg)
+                self._pick_area(p["m"], p["zone"], fg, reopen=True)
                 return
             self.root.deiconify()
             self.root.lift()
@@ -1338,10 +1383,35 @@ class WindowerApp:
         else:
             self.pick_on_screen(zoom=True)
 
-    def _pick_area(self, m: int, i: int, hwnd: int) -> None:
+    def zoom_active_window(self) -> None:
+        """Hotkey: drag over part of the active window; a zone then shows just that part.
+
+        The zone is the one the window is tiled in (it becomes a zoom of it), else a zone
+        already zooming it, else the selected zone of the monitor the window is on."""
+        fg = self.be.root_window(self.be.foreground() or 0)
+        if (not fg or fg == self.be.root_window(self.root.winfo_id())
+                or fg not in {w.hwnd for w in self.be.list_windows()}):
+            self.set_status("Click the window you want to zoom into, then press the zoom hotkey.", warn=True)
+            return
+        key = self._find(fg) or next(((m, i) for m, i, s in self._zooms() if s.hwnd == fg), None)
+        if key is None:
+            m = self._screen_here()
+            if self.screens[m].selected is None:
+                self.set_status("Select a zone first (in the panel, or with the zone hotkeys).", warn=True)
+                return
+            key = (m, self.screens[m].selected)
+        self._pick_area(*key, fg)
+
+    def _pick_area(self, m: int, i: int, hwnd: int, reopen: bool | None = None) -> None:
+        """Drag over part of hwnd; zone i of monitor m then shows it. The panel is put
+        back afterwards if it was open (or if reopen says so)."""
         if self._area_picker:
             return
+        if reopen is None:
+            reopen = self.root.state() not in ("iconic", "withdrawn")
         self.views.end_peek()
+        self.views.exempt.add(hwnd)      # a hidden (zoomed) window must show while you drag over it
+        self.views.sync_hidden()
         self.be.focus(hwnd)              # the window must be visible to drag over it
         s = self.screens[m].slots[i]
         current = s.crop if s and s.hwnd == hwnd else None
@@ -1350,8 +1420,10 @@ class WindowerApp:
 
         def done(rect: Rect | None) -> None:
             self._area_picker = None
-            self.root.deiconify()
-            self.root.lift()
+            self.views.exempt.discard(hwnd)
+            if reopen:
+                self.root.deiconify()
+                self.root.lift()
             if rect:
                 self._set_zoom(m, i, hwnd, rect)
             else:
@@ -1377,7 +1449,7 @@ class WindowerApp:
             self.be.set_topmost(old.hwnd, False)      # the zoom view stays on top instead
         slot = old if old and old.hwnd == hwnd else Slot.from_window(wins[hwnd])
         slot.topmost = bool(old and old.topmost)
-        slot.crop = crop
+        slot.crop = slot.home = crop
         self.screens[m].slots[i] = slot
         self._set_current(m)
         self._select_zone(i)             # redraws the preview, which creates/updates the zoom view
@@ -1386,9 +1458,11 @@ class WindowerApp:
         self._refresh_handles()
         t = self._target(i, m)
         factor = min(t.w / crop.w, t.h / crop.h)
+        hidden = (" The window itself is hidden; click the view (or Alt+Tab to it) to use it."
+                  if self.hidezoom_var.get() else " Click it to use the window.")
         self.set_status(f"{self._zone_name(m, i).capitalize()} shows a {crop.w}x{crop.h} area of "
-                        f"{_short_app(slot.exe)} ({factor:.1f}x). Click it to use the window; keep the "
-                        f"window open and not minimized.")
+                        f"{_short_app(slot.exe)} ({factor:.1f}x).{hidden} Keep the window open and "
+                        f"not minimized.")
 
     def unzoom_selected(self) -> None:
         """Turn the selected zoom zone back into a normal zone (the whole window is tiled there)."""
@@ -1854,7 +1928,7 @@ class WindowerApp:
         self._save_settings()
         if announce:
             self.set_status("Hotkeys off." if mod == "Off" else
-                            f"Hotkeys: {mod} + 1-9 / arrows / Enter / W / H / Z  (press ? for the full list)")
+                            f"Hotkeys: {mod} + 1-9 / arrows / Enter / W / H / S / Z  (press ? for the full list)")
 
     def show_hotkey_help(self) -> None:
         t = tk.Toplevel(self.root)
@@ -1951,6 +2025,8 @@ class WindowerApp:
             self._handles_toggled()
         elif action == "show_zones":
             self.identify()
+        elif action == "zoom_window":
+            self.zoom_active_window()
 
 
 def _short_app(exe: str) -> str:

@@ -86,6 +86,30 @@ def crop_from(data) -> Rect | None:
     return Rect(x, y, w, h) if w >= MIN_CROP and h >= MIN_CROP else None
 
 
+def pan_crop(crop: Rect, dx: float, dy: float, w: int, h: int) -> Rect:
+    """crop moved by (dx, dy) client px, kept inside a w x h client area."""
+    x = min(max(round(crop.x + dx), 0), max(0, w - crop.w))
+    y = min(max(round(crop.y + dy), 0), max(0, h - crop.h))
+    return Rect(x, y, crop.w, crop.h)
+
+
+def zoom_crop(crop: Rect, factor: float, fx: float, fy: float, w: int, h: int,
+              aspect: float | None = None) -> Rect:
+    """crop zoomed in by `factor` (> 1 shows less, < 1 more) around the point at
+    fractions (fx, fy) of it, which stays where it is. The result has the proportions
+    `aspect` (w / h, default: crop's), is at least MIN_CROP and at most the w x h
+    client area, and lies inside it."""
+    aspect = aspect or crop.w / crop.h
+    nw = crop.w / factor
+    nh = nw / aspect
+    lo = max(MIN_CROP / nw, MIN_CROP / nh)          # grow both sides to reach MIN_CROP
+    hi = min(w / nw, h / nh) if w > 0 and h > 0 else 1.0   # shrink both to fit the client
+    s = max(lo, min(1.0, hi)) if hi >= lo else hi
+    nw, nh = max(1, round(nw * s)), max(1, round(nh * s))
+    px, py = crop.x + fx * crop.w, crop.y + fy * crop.h
+    return pan_crop(Rect(0, 0, nw, nh), px - fx * nw, py - fy * nh, w, h)
+
+
 def peek_rect(frame: Rect, client: Rect, crop: Rect, view: Rect, area: Rect) -> Rect:
     """Where to move a window (same size) so the cropped part of it sits centred on
     the zoom view and, if it fits, entirely inside `area` (the monitor's work area).
@@ -198,6 +222,7 @@ class Slot:
     topmost: bool = False
     crop: Rect | None = None      # area of the window's client area, in its pixels
     app_id: str = ""              # Store apps: AppUserModelID, how they're launched (their exe can't be run)
+    home: Rect | None = None      # the area as picked (not saved): "fit" goes back to it, zooming keeps its shape
 
     @staticmethod
     def from_window(w: WindowInfo) -> "Slot":

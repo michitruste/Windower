@@ -838,6 +838,65 @@ WS_EX_LAYERED = 0x00080000
 WS_EX_TRANSPARENT = 0x00000020
 
 
+LWA_ALPHA = 0x2
+RDW_INVALIDATE, RDW_ERASE, RDW_ALLCHILDREN, RDW_FRAME = 0x1, 0x4, 0x80, 0x400
+_proto(user32.SetLayeredWindowAttributes, wintypes.BOOL, wintypes.HWND, wintypes.DWORD, ctypes.c_ubyte,
+       wintypes.DWORD)
+_proto(user32.GetLayeredWindowAttributes, wintypes.BOOL, wintypes.HWND, ctypes.POINTER(wintypes.DWORD),
+       ctypes.POINTER(ctypes.c_ubyte), ctypes.POINTER(wintypes.DWORD))
+_proto(user32.RedrawWindow, wintypes.BOOL, wintypes.HWND, ctypes.c_void_p, ctypes.c_void_p, wintypes.UINT)
+
+
+def _layered_attrs(hwnd) -> tuple[int, int, int] | None:
+    key, alpha, flags = wintypes.DWORD(), ctypes.c_ubyte(), wintypes.DWORD()
+    if not user32.GetLayeredWindowAttributes(hwnd, ctypes.byref(key), ctypes.byref(alpha), ctypes.byref(flags)):
+        return None
+    return key.value, alpha.value, flags.value
+
+
+def ghost(hwnd: int) -> list[int] | None:
+    """Make another app's window fully transparent and click-through.
+
+    It keeps running and DWM keeps drawing it, so a zoom view of it stays live
+    (measured: the thumbnail shows the window at full opacity while alpha is 0).
+    Returns what unghost() needs, or None if it can't be done (hung, elevated, or
+    a window that draws itself with UpdateLayeredWindow).
+    """
+    if not is_window(hwnd) or user32.IsHungAppWindow(hwnd):
+        return None
+    ex = _GetWindowLong(hwnd, GWL_EXSTYLE)
+    old = (0, 255, 0)
+    if ex & WS_EX_LAYERED:
+        old = _layered_attrs(hwnd)
+        if old is None:
+            return None
+    _SetWindowLong(hwnd, GWL_EXSTYLE, ex | WS_EX_LAYERED | WS_EX_TRANSPARENT)
+    if not user32.SetLayeredWindowAttributes(hwnd, 0, 0, LWA_ALPHA):
+        _SetWindowLong(hwnd, GWL_EXSTYLE, ex)
+        return None
+    return [ex, *old]
+
+
+def unghost(hwnd: int, state: list[int]) -> None:
+    """Undo ghost(). Does nothing if the window isn't ghosted any more (or the handle
+    now belongs to another window, after a crash)."""
+    if not is_window(hwnd):
+        return
+    ex, key, alpha, flags = (int(v) for v in state)
+    cur = _GetWindowLong(hwnd, GWL_EXSTYLE)
+    now = _layered_attrs(hwnd) if cur & WS_EX_LAYERED else None
+    if not (cur & WS_EX_TRANSPARENT) or not now or now[1] != 0 or not now[2] & LWA_ALPHA:
+        return
+    if ex & WS_EX_LAYERED:
+        user32.SetLayeredWindowAttributes(hwnd, key, alpha, flags)
+    else:   # back to a normal window: drop the layered style and repaint it
+        user32.SetLayeredWindowAttributes(hwnd, 0, 255, LWA_ALPHA)
+    _SetWindowLong(hwnd, GWL_EXSTYLE, (cur & ~(WS_EX_LAYERED | WS_EX_TRANSPARENT))
+                   | (ex & (WS_EX_LAYERED | WS_EX_TRANSPARENT)))
+    if not ex & WS_EX_LAYERED:
+        user32.RedrawWindow(hwnd, None, None, RDW_ERASE | RDW_INVALIDATE | RDW_FRAME | RDW_ALLCHILDREN)
+
+
 def style_overlay(tk_hwnd: int, click_through: bool) -> None:
     """Make one of our own Tk popups a no-activate tool window (optionally click-through).
 

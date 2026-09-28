@@ -187,6 +187,22 @@ def style_overlay(tk_hwnd: int, click_through: bool) -> None:
     pass
 
 
+def ghost(hwnd: int) -> list[int] | None:
+    if hwnd not in _windows or _windows[hwnd].get("ghost"):
+        return None
+    _windows[hwnd]["ghost"] = True
+    return [0, 0, 255, 0]
+
+
+def unghost(hwnd: int, state: list[int]) -> None:
+    if hwnd in _windows:
+        _windows[hwnd]["ghost"] = False
+
+
+def is_ghost(hwnd: int) -> bool:   # test helper
+    return bool(_windows.get(hwnd, {}).get("ghost"))
+
+
 class EventSource:
     """Fake event thread: tests push events with fire()."""
 

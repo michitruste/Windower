@@ -15,7 +15,7 @@ The user has customised: title "Windower (michi's version)" and trimmed presets 
 - **Sticky edges**: a WinEvent hook (EVENT_SYSTEM_MOVESIZESTART/END) runs on a background thread with its own message loop (win32.EventSource). While a tiled window is being resized, the Tk loop polls its rect every 25 ms and moves the shared dividers. Neighbours are placed with SWP_ASYNCWINDOWPOS. Only the sides the user actually grabbed count. Screen edges stay pinned.
 - **Grips**: the preview canvas draws dividers and nodes and they can be dragged. The optional desktop handles (desktop.py) are small topmost no-activate Tk windows.
 - **Shift-drag snapping**: when a window move has Shift held, a click-through SnapOverlay appears; dropping on a zone calls put_window_in_zone (swaps if the zone is taken).
-- **Global hotkeys**: RegisterHotKey on the event thread; the modifier is selectable (Ctrl+Alt by default). The table is in hotkeys.py (ids 1-9 focus, 11-19 move, 20-27 arrows focus/swap, 30 apply, 31 panel, 32 handles, 33 zones).
+- **Global hotkeys**: RegisterHotKey on the event thread; the modifier is selectable (Ctrl+Alt by default). The table is in hotkeys.py (ids 1-9 focus, 11-19 move, 20-27 arrows focus/swap, 30 apply, 31 panel, 32 handles, 33 zones (S), 34 zoom (Z)).
 - The fake backend (fakewin.py) mirrors all of this. /tmp scripted GUI tests covered node, divider, sticky resize, pinned edges, snap and swap, hotkeys, handles and the editor.
 
 ## Per-monitor layouts
@@ -52,8 +52,20 @@ The user has customised: title "Windower (michi's version)" and trimmed presets 
 - `launch(exe_path, app_id)` uses `shell:AppsFolder\<id>`. Without an id, `_store_app_id` works it out from a WindowsApps path (Name_PublisherId + Application Id from AppxManifest.xml, else "App"), so older workspaces work too. A bare ApplicationFrameHost.exe path returns False. Launching WhatsApp this way was confirmed on the real machine.
 - `_wait_for_launched` (30 s) no longer calls apply(): it places only the slots that just got a window (`_place_slots`, no z-order change). Before, it raised every tiled window once a second, covering the panel.
 
+## Hidden zoom sources, zoom hotkey
+- While a window is seen only through zoom views (not tiled, not peeked, not exempt), ZoomViews.sync_hidden **ghosts** it: win32.ghost adds WS_EX_LAYERED|WS_EX_TRANSPARENT with alpha 0 (click-through, invisible). **Measured**: the DWM thumbnail still shows it at full opacity and stays live; unghost restores the exact exstyle and old layered attrs. Windows already drawing with UpdateLayeredWindow (no GetLayeredWindowAttributes) aren't ghosted. unghost is a no-op unless the window is still ghosted (safe after hwnd reuse).
+- Setting `hide_zoomed` (default on, "Hide zoomed windows"). Peek un-ghosts; end_peek re-ghosts (send_to_back only if it couldn't be ghosted). Switching to a ghosted window (Alt+Tab, taskbar) auto-peeks it; `_last_fg` is reset on every ghost change so hiding the active window doesn't count as a switch. `views.exempt` holds windows under the AreaPicker.
+- Crash safety: ghosted hwnds + state go to `hidden_windows.json` next to config.json; `views.recover()` at startup un-ghosts them. close_all un-ghosts everything.
+- Hotkeys: 33 show zones is now **S**; 34 `zoom_window` = **Z** → `app.zoom_active_window()`: zone = where the active window is tiled, else a zone zooming it, else the selected zone of `_screen_here()`. `_pick_area(reopen=None)` only reopens the panel if it was open.
+
+## Zoom view controls (pan, wheel zoom, title bar)
+- ZoomView = FRAME_BG toplevel (BORDER px frame = resize area; `<Motion>`/press on the toplevel itself, `e.widget is t`) holding a title bar (icon, "app · 2.3x", − + ⤢ ≡ ✕) and the picture Label. The thumbnail dest is `fit_aspect(content(), crop)`, below the title bar (DWM draws over child widgets). Sizes x `app.scale`.
+- Picture: press+move ≥ DRAG_START px pans (`model.pan_crop`, always from the start crop), a click without movement peeks. `<MouseWheel>` bound on the toplevel: Ctrl = `model.zoom_crop` around the pointer, Shift = sideways, else vertical. All of it just changes `slot.crop` → `on_crop` (app debounces a preview redraw + status). `Slot.home` = the picked area (runtime only; set in `_set_zoom`, else from the crop when the view is made): ⤢ returns to it and zoom keeps its aspect.
+- Title-bar drag / frame resize set `view.floating`; `update()` then only records `zone_rect`. `ZoomViews.dock()` is called by apply() (per `only`), double-click on the title bar and the zone menu item. Peek uses the view's on-screen content rect and the work area under a floated view (`sync(want, areas)`).
+- Unconfirmed on the real machine: wheel events reaching the no-activate view (relies on Tk 8.6 sending the wheel to the window under the pointer).
+
 ## Status
-- Unit tests (40) and scripted GUI flows with the fake backend pass. The real Win32 run confirmed the cropped thumbnail pixels, peek and return, and the picker hole. Hooks, hotkeys and async placement are still unconfirmed on the user's machine.
+- Unit tests (47) and scripted GUI flows with the fake backend pass. The real Win32 run confirmed the cropped thumbnail pixels, peek and return, and the picker hole. Hooks, hotkeys and async placement are still unconfirmed on the user's machine.
 
 ## Next ideas
 A tray icon and autostart.

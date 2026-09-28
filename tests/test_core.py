@@ -11,7 +11,7 @@ from windower_app.icons import png_bytes, rgba_from_black_white  # noqa: E402
 from windower_app.model import (MIN_ZONE, Layout, Monitor, Rect, Screen, Slot, WindowInfo, Zone,  # noqa: E402
                                  clamp_crop, crop_from, dividers, edge_group, fit_aspect, fit_on_screen,
                                  match_window, monitor_at, move_edges, neighbour, node_edges, nodes,
-                                 peek_rect, snap_value)
+                                 MIN_CROP, pan_crop, peek_rect, snap_value, zoom_crop)
 from windower_app.presets import PRESETS  # noqa: E402
 from windower_app.storage import Store  # noqa: E402
 
@@ -152,6 +152,10 @@ class HotkeyTests(unittest.TestCase):
         self.assertEqual(hotkeys.describe(20, "Win+Alt"), "Win+Alt+Left")
         self.assertEqual(hotkeys.describe(30, "Ctrl+Alt"), "Ctrl+Alt+Enter")
         self.assertEqual(hotkeys.describe(31, "Ctrl+Alt"), "Ctrl+Alt+W")
+        self.assertEqual(hotkeys.ACTIONS[33][0], "show_zones")
+        self.assertEqual(hotkeys.describe(33, "Ctrl+Alt"), "Ctrl+Alt+S")
+        self.assertEqual(hotkeys.ACTIONS[34][0], "zoom_window")
+        self.assertEqual(hotkeys.describe(34, "Ctrl+Alt"), "Ctrl+Alt+Z")
 
 
 class StoreTests(unittest.TestCase):
@@ -324,6 +328,29 @@ class ZoomTests(unittest.TestCase):
         self.assertEqual(left + crop.w, 1920)                        # pushed back inside
         self.assertEqual(top, 0)
 
+    def test_pan_stays_inside_the_window(self):
+        crop = Rect(100, 100, 200, 100)
+        self.assertEqual(pan_crop(crop, 50, -20, 800, 600), Rect(150, 80, 200, 100))
+        self.assertEqual(pan_crop(crop, -500, 900, 800, 600), Rect(0, 500, 200, 100))
+        self.assertEqual(pan_crop(Rect(0, 0, 900, 100), 50, 0, 800, 600).x, 0)   # wider than the window
+
+    def test_zoom_keeps_the_point_under_the_pointer(self):
+        crop = Rect(100, 100, 400, 200)
+        z = zoom_crop(crop, 2, 0.25, 0.5, 1920, 1080)
+        self.assertEqual((z.w, z.h), (200, 100))
+        self.assertEqual((z.x + 0.25 * z.w, z.y + 0.5 * z.h), (200, 200))      # same window point
+        out = zoom_crop(z, 0.5, 0.25, 0.5, 1920, 1080)
+        self.assertEqual(out, crop)                                       # and back
+
+    def test_zoom_limits(self):
+        crop = Rect(0, 0, 40, 20)
+        tiny = zoom_crop(crop, 100, 0.5, 0.5, 800, 600)
+        self.assertEqual((tiny.w, tiny.h), (2 * MIN_CROP, MIN_CROP))       # never below MIN_CROP, same shape
+        big = zoom_crop(crop, 0.001, 0.5, 0.5, 800, 600)
+        self.assertEqual((big.x, big.y, big.w, big.h), (0, 0, 800, 400))  # at most the whole window
+        # the picked area's shape is kept even if rounding changed the current one
+        self.assertEqual(zoom_crop(Rect(0, 0, 101, 50), 1, 0, 0, 800, 600, aspect=2.0), Rect(0, 0, 101, 50))
+
 
 class StoreAppTest(unittest.TestCase):
     def test_app_id_saved_in_workspace(self):
@@ -338,6 +365,77 @@ class StoreAppTest(unittest.TestCase):
         self.assertEqual(_store_app_id(path), "Vendor.SomeApp_abc123xyz!App")   # no manifest: default id
         self.assertEqual(_store_app_id(r"C:\Program Files\Google\Chrome\Application\chrome.exe"), "")
         self.assertEqual(_store_app_id(r"C:\Program Files\WindowsApps\odd\x.exe"), "")
+
+
+class HiddenZoomSourceTest(unittest.TestCase):
+    """A window seen only through a zoom view is hidden; peeking, tiling and closing show it."""
+
+    def setUp(self):
+        import tkinter as tk
+        from windower_app.zoomview import ZoomViews
+        try:
+            self.root = tk.Tk()
+        except tk.TclError:
+            self.skipTest("no display")
+        self.root.withdraw()
+        self.tmp = tempfile.TemporaryDirectory()
+        self.journal = Path(self.tmp.name) / "hidden_windows.json"
+        self.tiled: set[int] = set()
+        self.views = ZoomViews(self.root, fakewin, on_menu=lambda *a: None, is_tiled=self.tiled.__contains__,
+                               journal=self.journal)
+        self.slot = Slot(1010, "YouTube", "chrome.exe", crop=Rect(10, 10, 200, 100))
+        self.work = Rect(0, 0, 1920, 1040)
+
+    def tearDown(self):
+        self.views.close_all()
+        self.root.destroy()
+        self.tmp.cleanup()
+        for h in (1010, 1020):
+            fakewin.unghost(h, [])
+
+    def test_hide_peek_and_restore(self):
+        self.views.sync({(0, 0): (self.slot, Rect(0, 0, 960, 1040), self.work)})
+        self.assertTrue(fakewin.is_ghost(1010))
+        self.assertTrue(self.journal.exists())
+        self.views.peek((0, 0))
+        self.assertFalse(fakewin.is_ghost(1010))          # visible while you use it
+        fakewin.set_foreground(1020)
+        self.views.end_peek()
+        self.assertTrue(fakewin.is_ghost(1010))
+        self.tiled.add(1010)                              # also tiled in a zone of its own: stays visible
+        self.views.sync_hidden()
+        self.assertFalse(fakewin.is_ghost(1010))
+        self.tiled.clear()
+        self.views.hide_sources = False
+        self.views.sync_hidden()
+        self.assertFalse(fakewin.is_ghost(1010))
+        self.views.hide_sources = True
+        self.views.sync_hidden()
+        self.views.close_all()
+        self.assertFalse(fakewin.is_ghost(1010))
+        self.assertFalse(self.journal.exists())
+
+    def test_switching_to_hidden_window_peeks_it(self):
+        fakewin.set_foreground(1020)
+        self.views.sync({(0, 0): (self.slot, Rect(0, 0, 960, 1040), self.work)})
+        fakewin.set_foreground(1010)                      # Alt+Tab to it
+        self.views._check_switch()
+        self.assertEqual(self.views.peeking, 1010)
+        self.assertFalse(fakewin.is_ghost(1010))
+
+    def test_hiding_the_active_window_does_not_peek_it(self):
+        fakewin.set_foreground(1010)                      # zoom hotkey pressed in that window
+        self.views.sync({(0, 0): (self.slot, Rect(0, 0, 960, 1040), self.work)})
+        self.views._check_switch()
+        self.assertEqual(self.views.peeking, 0)
+        self.assertTrue(fakewin.is_ghost(1010))
+
+    def test_recover_after_crash(self):
+        fakewin.ghost(1020)
+        self.journal.write_text('{"1020": [0, 0, 255, 0]}', encoding="utf-8")
+        self.views.recover()
+        self.assertFalse(fakewin.is_ghost(1020))
+        self.assertFalse(self.journal.exists())
 
 
 if __name__ == "__main__":

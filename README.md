@@ -58,10 +58,25 @@ stays live: videos keep playing and text keeps updating.
 3. The zone now shows that area. The window itself is **not** moved into the zone. Keep it
    open anywhere, even behind other windows or tiled in another zone.
 
-- **Click a zoom view to use the window.** The real window slides over the view, with the
-  chosen area centred on it, and gets the focus. Once you switch to another app, it goes back
-  where it was, behind the others. If the window is tiled in another zone as well, clicking just
-  focuses it there.
+Quicker: click the window and press **Ctrl+Alt+Z**, then drag over the area. If the window is
+tiled in a zone, that zone becomes the zoom of it; otherwise the selected zone of that monitor is used.
+
+- **The zoomed window is hidden** (fully transparent and click-through, so it doesn't cover
+  anything) while it's only seen through zoom views. It keeps running and the view stays live.
+  Turn this off with *Hide zoomed windows* at the top. Windows that are also tiled in a zone of
+  their own stay visible. Closing Windower shows them again; if Windower crashes, the next start
+  does it.
+- **Click a zoom view to use the window**, or Alt+Tab / click it on the taskbar. The real window
+  shows up over the view, with the chosen area centred on it, and gets the focus. Once you switch
+  to another app, it goes back where it was and is hidden again. If the window is tiled in another
+  zone as well, clicking just focuses it there.
+- **Move around inside the view**: drag the picture to pan, use the mouse wheel to scroll
+  (Shift+wheel sideways), and **Ctrl+wheel** to zoom in/out around the pointer. The title bar's
+  **−** / **+** zoom too, and **⤢** goes back to the area you picked. What you end up showing is what
+  a workspace saves.
+- **Title bar**: drag it to move the view, drag the view's thin frame (edges or corners) to resize
+  it. A moved view floats off its zone until you double-click its title bar, choose *Put the view
+  back in its zone*, or press Apply. **≡** opens the zone menu, **✕** clears the zone.
 - Right-click a zoom view (on the desktop or in the preview) for *Change zoom area...* and
   *Show whole window (tile it)*. *Always on top* keeps the zoom view above other windows.
 - Dividers, nodes, desktop handles, swapping and workspaces all work with zoom zones.
@@ -146,7 +161,8 @@ These work from any app. The modifier can be changed in the *Hotkeys* box (`Ctrl
 | Ctrl+Alt + Enter | Apply / re-tile the layout |
 | Ctrl+Alt + W | Show / hide the Windower panel |
 | Ctrl+Alt + H | Show / hide the resize handles on the desktop |
-| Ctrl+Alt + Z | Flash the zones on screen |
+| Ctrl+Alt + S | Flash the zones on screen |
+| Ctrl+Alt + Z | Zoom: drag over part of the active window to show it in its zone (the zone it's tiled in, else the selected zone) |
 
 If another program already uses a combination, the status bar tells you which one. You can then
 pick a different modifier. (Some Intel graphics drivers use Ctrl+Alt+Arrow to rotate the screen;

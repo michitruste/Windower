@@ -12,8 +12,7 @@ Only the Python standard library is used (tkinter + ctypes), so there's nothing 
 ## Start it
 
 ```
-cd C:\Python311\windower
-C:\Python311\python.exe main.py
+python main.py
 ```
 
 To start it without a console window, double-click **`Windower.pyw`**.
